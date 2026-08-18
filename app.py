@@ -22,18 +22,14 @@ MODELS = {"ecmwf": "ecmwf_ifs", "gfs": "gfs_seamless", "icon": "icon_seamless", 
 ALL_9 = ["ecmwf", "gfs", "icon", "arome", "jma", "yr_no", "cma_china", "imd_india", "fallback_7timer"]
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-if "w9" not in st.session_state:
-    st.session_state.w9 = {m: 1.0 / len(ALL_9) for m in ALL_9}
+if "w9" not in st.session_state: st.session_state.w9 = {m: 1.0 / len(ALL_9) for m in ALL_9}
 w = st.session_state.w9
 
 @st.cache_data(ttl=1800)
 def fetch_radar_data(weights):
     forecast, tele, audit = [], {m: "🔴 Недоступен" for m in ALL_9}, {m: 0 for m in ALL_9}
-    
     for d in DISTRICTS:
-        probs = {m: None for m in ALL_9}
-        t_str, idx = None, 0
-        
+        probs, t_str, idx = {m: None for m in ALL_9}, None, 0
         try:
             res = requests.get(f"https://open-meteo.com{d['lat']}&longitude={d['lon']}&current=time&timezone=auto", headers=HEADERS, timeout=3.0)
             if res.status_code == 200: t_str = res.json().get("current", {}).get("time")
@@ -62,7 +58,7 @@ def fetch_radar_data(weights):
         try:
             res = requests.get(f"https://7timer.info{d['lon']}&lat={d['lat']}&ac=0&unit=metric&output=json", headers=HEADERS, timeout=3.0)
             ds = res.json().get("dataseries", []) if res.status_code == 200 else []
-            w_text = ds[0].get("weather", "clear") if ds else "clear"
+            w_text = ds.get("weather", "clear") if ds else "clear"
             probs["fallback_7timer"] = 85 if "rain" in w_text or "shower" in w_text else (35 if "cloud" in w_text else 10)
             tele["fallback_7timer"], audit["fallback_7timer"] = "🟢 OK (Канал)", min(len(ds), 24)
         except:
@@ -75,10 +71,8 @@ def fetch_radar_data(weights):
 
         act = [m for m in ALL_9 if probs[m] is not None]
         final_p = min(max(int(sum((weights[m] / sum(weights[a] for a in act)) * probs[m] for m in act)), 0), 100) if act else 25
-        
         src_disp = {m: f"Прогноз: {probs[m]}% (Полей: {audit[m]}/24)" for m in ALL_9}
         forecast.append({"name": d["name"], "center": d["center"], "prob": final_p, "src": src_disp})
-        
     return forecast, tele, audit
 
 try:
@@ -94,19 +88,25 @@ try:
         if name and "район" not in name.lower(): name = f"{name} район"
         p = r_dict.get(name, 0.0)
         color = "#1f1fc2" if p > 70 else ("#6ba1ff" if p > 40 else ("#ffd166" if p > 25 else ("#aacc00" if p > 12 else "#47c95e")))
-        return {"fillColor": color, "color": "#1a1a1a", "weight": 2.5, "fillOpacity": 0.6}
+        return {"fillColor": color, "color": "#1a1a1a", "weight": 2.5, "fillOpacity": 0.3} # Прозрачность заливки 0.3
 
     folium.GeoJson(ufa_geo, style_function=style_d, tooltip=folium.GeoJsonTooltip(fields=["name"])).add_to(m)
     
     for dist in fdata:
-        folium.Marker(location=dist["center"], icon=folium.DivIcon(html=f"""<div style="font-family: 'Arial Black', sans-serif; font-size: 15px; color: #fff; background: rgba(26,26,26,0.85); padding: 4px 8px; border-radius: 6px; border: 1.5px solid #fff; text-align: center; transform: translate(-50%, -50%);">{dist['prob']}%</div>""")).add_to(m)
+        folium.Marker(
+            location=dist["center"],
+            icon=folium.DivIcon(
+                icon_size=(50, 50),
+                icon_anchor=(25, 15),
+                html=f"""<div style="font-family: 'Arial Black', Gadget, sans-serif; font-size: 16px; font-weight: 900; color: #0f172a; text-shadow: 2px 2px 0px #ffffff, -2px -2px 0px #ffffff, 2px -2px 0px #ffffff, -2px 2px 0px #ffffff; text-align: center; width: 100%;">{dist['prob']}%</div>"""
+            )
+        ).add_to(m)
     
-    st_folium(m, width=900, height=520, key="ufa_map_v20")
+    st_folium(m, width=900, height=520, key="ufa_map_v21")
     
     st.markdown("### 🖥️ Статус 9 метео-серверов")
     cols = st.columns(9)
     labels = [("ecmwf", "ECMWF"), ("gfs", "GFS"), ("icon", "ICON"), ("arome", "France"), ("jma", "JMA"), ("yr_no", "Yr.no"), ("cma_china", "CMA"), ("imd_india", "IMD"), ("fallback_7timer", "Резерв")]
-    
     for i, (k, lbl) in enumerate(labels):
         with cols[i]: st.success(f"**{lbl}**\n\n{tdata.get(k, '🟢 OK')}\n\n📊 Пул: {adata.get(k, 24)}/24")
 
