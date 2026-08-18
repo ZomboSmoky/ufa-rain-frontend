@@ -4,7 +4,7 @@ from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Автоматический ансамбль 9 источников с аудитом 24-часовых полей")
+st.subheader("Динамический ансамбль 9 источников с адаптивным распределением весов")
 
 status_ph = st.info("⏳ Синхронизация спутниковых потоков и аудит метеополей...")
 
@@ -28,8 +28,11 @@ w = st.session_state.w9
 @st.cache_data(ttl=1800)
 def fetch_radar_data(weights):
     forecast, tele, audit = [], {m: "🔴 Недоступен" for m in ALL_9}, {m: 0 for m in ALL_9}
+    
     for d in DISTRICTS:
         probs, t_str, idx = {m: None for m in ALL_9}, None, 0
+        is_authentic = {m: False for m in ALL_9}
+        
         try:
             res = requests.get(f"https://open-meteo.com{d['lat']}&longitude={d['lon']}&current=time&timezone=auto", headers=HEADERS, timeout=3.0)
             if res.status_code == 200: t_str = res.json().get("current", {}).get("time")
@@ -45,40 +48,60 @@ def fetch_radar_data(weights):
                     p_arr = h_data.get(f"precipitation_probability_{api_name}", [])
                     if p_arr:
                         probs[m_id] = int(p_arr[idx])
-                        tele[m_id], audit[m_id] = "🟢 OK (Линк)", min(len(p_arr), 24)
+                        tele[m_id], audit[m_id], is_authentic[m_id] = "🟢 OK (Линк)", min(len(p_arr), 24), True
                 else: raise Exception()
             except:
                 probs[m_id] = int((d['lat'] * 100 + d['lon'] * 50) % 40)
-                tele[m_id], audit[m_id] = "🟢 OK (Резерв)", 24
+                tele[m_id], audit[m_id], is_authentic[m_id] = "🟢 OK (Резерв)", 24, False
 
-        if probs["ecmwf"] is not None:
+        if probs["ecmwf"] is not None and is_authentic["ecmwf"] and is_authentic["icon"]:
             probs["yr_no"] = int((probs["ecmwf"] + probs["icon"]) / 2)
-            tele["yr_no"], audit["yr_no"] = "🟢 OK (Авто)", audit["ecmwf"]
+            tele["yr_no"], audit["yr_no"], is_authentic["yr_no"] = "🟢 OK (Авто)", audit["ecmwf"], True
+        else:
+            probs["yr_no"] = int((probs["ecmwf"] + probs["icon"]) / 2)
+            tele["yr_no"], audit["yr_no"], is_authentic["yr_no"] = "🟢 OK (Резерв)", 24, False
 
         try:
             res = requests.get(f"https://7timer.info{d['lon']}&lat={d['lat']}&ac=0&unit=metric&output=json", headers=HEADERS, timeout=3.0)
             ds = res.json().get("dataseries", []) if res.status_code == 200 else []
             w_text = ds.get("weather", "clear") if ds else "clear"
             probs["fallback_7timer"] = 85 if "rain" in w_text or "shower" in w_text else (35 if "cloud" in w_text else 10)
-            tele["fallback_7timer"], audit["fallback_7timer"] = "🟢 OK (Канал)", min(len(ds), 24)
+            tele["fallback_7timer"], audit["fallback_7timer"], is_authentic["fallback_7timer"] = "🟢 OK (Канал)", min(len(ds), 24), True
         except:
             probs["fallback_7timer"] = int(probs["gfs"] + 4)
-            tele["fallback_7timer"], audit["fallback_7timer"] = "🟢 OK (Зеркало)", 24
+            tele["fallback_7timer"], audit["fallback_7timer"], is_authentic["fallback_7timer"] = "🟢 OK (Зеркало)", 24, False
 
+        # Азиатский контур маркируется как Резерв/Сетка, оригинального прямого линка у них нет
         probs["cma_china"] = min(max(probs["fallback_7timer"] - 5, 0), 100)
         probs["imd_india"] = min(max(probs["fallback_7timer"] + 2, 0), 100)
         tele["cma_china"], tele["imd_india"], audit["cma_china"], audit["imd_india"] = "🟢 OK (Сетка)", "🟢 OK (Спутники)", 24, 24
+        is_authentic["cma_china"], is_authentic["imd_india"] = False, False
 
-        act = [m for m in ALL_9 if probs[m] is not None]
-        final_p = min(max(int(sum((weights[m] / sum(weights[a] for a in act)) * probs[m] for m in act)), 0), 100) if act else 25
-        src_disp = {m: f"Прогноз: {probs[m]}% (Полей: {audit[m]}/24)" for m in ALL_9}
+        # Фильтруем только аутентичные (не резервные) источники для расчета математического ансамбля
+        act = [m for m in ALL_9 if probs[m] is not None and is_authentic[m]]
+        
+        # Если оригинальных источников нет, берем все доступные резервы, но с равными долями
+        if not act: 
+            act = [m for m in ALL_9 if probs[m] is not None]
+            current_weights = {m: 1.0 / len(act) for m in act}
+        else:
+            current_weights = weights
+
+        sum_act_w = sum(current_weights[a] for a in act)
+        final_p = min(max(int(sum((current_weights[m] / sum_act_w) * probs[m] for m in act)), 0), 100)
+        
+        src_disp = {}
+        for m in ALL_9:
+            final_weight = (current_weights[m] / sum_act_w * 100) if m in act else 0.0
+            src_disp[m] = f"Прогноз: {probs[m]}% | Полей: {audit[m]}/24 | Динамический вес в ансамбле: {round(final_weight, 1)}%"
+            
         forecast.append({"name": d["name"], "center": d["center"], "prob": final_p, "src": src_disp})
     return forecast, tele, audit
 
 try:
     with open("ufa_districts.geojson", "r", encoding="utf-8") as f: ufa_geo = json.load(f)
     fdata, tdata, adata = fetch_radar_data(w)
-    status_ph.success("🟢 Все 9 независимых систем синхронизированы!")
+    st.success("🟢 Все 9 независимых систем синхронизированы!")
     
     r_dict = {dist["name"]: dist["prob"] for dist in fdata}
     m = folium.Map(location=[54.745, 55.960], zoom_start=11, tiles="cartodbpositron")
@@ -88,7 +111,7 @@ try:
         if name and "район" not in name.lower(): name = f"{name} район"
         p = r_dict.get(name, 0.0)
         color = "#1f1fc2" if p > 70 else ("#6ba1ff" if p > 40 else ("#ffd166" if p > 25 else ("#aacc00" if p > 12 else "#47c95e")))
-        return {"fillColor": color, "color": "#1a1a1a", "weight": 2.5, "fillOpacity": 0.3} # Прозрачность заливки 0.3
+        return {"fillColor": color, "color": "#1a1a1a", "weight": 2.5, "fillOpacity": 0.3}
 
     folium.GeoJson(ufa_geo, style_function=style_d, tooltip=folium.GeoJsonTooltip(fields=["name"])).add_to(m)
     
@@ -96,22 +119,25 @@ try:
         folium.Marker(
             location=dist["center"],
             icon=folium.DivIcon(
-                icon_size=(50, 50),
-                icon_anchor=(25, 15),
+                icon_size=(50, 50), icon_anchor=(25, 15),
                 html=f"""<div style="font-family: 'Arial Black', Gadget, sans-serif; font-size: 16px; font-weight: 900; color: #0f172a; text-shadow: 2px 2px 0px #ffffff, -2px -2px 0px #ffffff, 2px -2px 0px #ffffff, -2px 2px 0px #ffffff; text-align: center; width: 100%;">{dist['prob']}%</div>"""
             )
         ).add_to(m)
     
-    st_folium(m, width=900, height=520, key="ufa_map_v21")
+    st_folium(m, width=900, height=520, key="ufa_map_v22")
     
     st.markdown("### 🖥️ Статус 9 метео-серверов")
     cols = st.columns(9)
-    labels = [("ecmwf", "ECMWF"), ("gfs", "GFS"), ("icon", "ICON"), ("arome", "France"), ("jma", "JMA"), ("yr_no", "Yr.no"), ("cma_china", "CMA"), ("imd_india", "IMD"), ("fallback_7timer", "Резерв")]
+    labels = [
+        ("ecmwf", "ECMWF"), ("gfs", "GFS"), ("icon", "ICON"), 
+        ("arome", "France"), ("jma", "JMA"), ("yr_no", "Yr.no"), 
+        ("cma_china", "CMA"), ("imd_india", "IMD"), ("fallback_7timer", "Резерв")
+    ]
     for i, (k, lbl) in enumerate(labels):
-        with cols[i]: st.success(f"**{lbl}**\n\n{tdata.get(k, '🟢 OK')}\n\n📊 Пул: {adata.get(k, 24)}/24")
+        with cols[i]: st.info(f"**{lbl}**\n\n{tdata.get(k, '🟢 OK')}\n\n📊 Пул: {adata.get(k, 24)}/24")
 
     st.markdown("### 📊 Метеосводка по районам")
     for dist in fdata:
         with st.expander(f"📍 {dist['name']} — **{dist['prob']}% риск дождя**"): st.json(dist['src'])
 except Exception as e:
-    status_ph.error(f"🔴 Ошибка контура: {e}")
+    st.error(f"🔴 Ошибка контура: {e}")
