@@ -3,14 +3,13 @@ import requests
 import folium
 from streamlit_folium import st_folium
 import json
-import random
 
-st.set_page_config(page_title="Радар Уфы — Автономный Ансамбль", layout="wide", page_icon="🌧️")
+st.set_page_config(page_title="Радар Уфы — Стабильный Ансамбль", layout="wide", page_icon="🌧️")
 
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Высокоточный анализ рисков осадков прямо с серверов Google Cloud (Без Render)")
+st.subheader("Высокоточный анализ рисков осадков с кэшированием данных на 1 час")
 
-status_placeholder = st.info("⏳ Запуск прямого спутникового сканирования и опрос метео-моделей...")
+status_placeholder = st.info("⏳ Загрузка метеоданных из кэша системы...")
 
 # --- АРХИТЕКТУРНАЯ БАЗА ДАННЫХ И НАСТРОЙКИ ---
 OFFICIAL_DISTRICTS = [
@@ -31,14 +30,15 @@ MODELS_CONFIG = {
 ALL_7_MODELS = ["ecmwf", "gfs", "icon", "arome", "jma", "yr_no", "fallback_7timer"]
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
-# Использование встроенного кэша весов
+# Использование встроенного хранилища весов
 if "model_weights" not in st.session_state:
     st.session_state.model_weights = {m: 1.0 / len(ALL_7_MODELS) for m in ALL_7_MODELS}
 
 weights = st.session_state.model_weights
 
-# --- ФУНКЦИЯ СБОРА ДАННЫХ ---
-def fetch_live_radar_data():
+# --- КЭШИРУЕМАЯ ФУНКЦИЯ: СКАНЕРИУЕТ СЕТЬ СТРОГО 1 РАЗ В ЧАС (ttl=3600) ---
+@st.cache_data(ttl=3600)
+def fetch_live_radar_data_cached(current_weights):
     updated_forecast = []
     global_telemetry = {m: "🔴 Недоступен" for m in ALL_7_MODELS}
     
@@ -62,7 +62,6 @@ def fetch_live_radar_data():
 
         raw_probs = {m: None for m in ALL_7_MODELS}
 
-        # Опрос Open-Meteo
         for model_id, api_model_name in MODELS_CONFIG.items():
             url = f"https://open-meteo.com{district['lat']}&longitude={district['lon']}&hourly=precipitation_probability&models={api_model_name}&forecast_days=1&timezone=auto"
             try:
@@ -86,14 +85,12 @@ def fetch_live_radar_data():
             except Exception:
                 global_telemetry[model_id] = "🔴 Ошибка сети"
 
-        # Модель №6: Yr.no
         if raw_probs["ecmwf"] is not None and raw_probs["icon"] is not None:
             raw_probs["yr_no"] = int((raw_probs["ecmwf"] + raw_probs["icon"]) / 2)
             global_telemetry["yr_no"] = "🟢 OK (Авторасчет)"
         else:
             global_telemetry["yr_no"] = "🔴 Нет базовых моделей"
 
-        # Модель №7: Резервный шлюз (7timer)
         fb_url = f"https://7timer.info{district['lon']}&lat={district['lat']}&ac=0&unit=metric&output=json"
         try:
             fb_res = requests.get(fb_url, timeout=3.5)
@@ -110,27 +107,14 @@ def fetch_live_radar_data():
         except Exception:
             global_telemetry["fallback_7timer"] = "🔴 Сбой резервной сети"
 
-        # Сборка ансамбля
         active_models = [m for m in ALL_7_MODELS if raw_probs[m] is not None]
         
         if active_models:
-            sum_active_weights = sum(weights[m] for m in active_models)
-            final_prob = sum((weights[m] / sum_active_weights) * raw_probs[m] for m in active_models)
+            sum_active_weights = sum(current_weights[m] for m in active_models)
+            final_prob = sum((current_weights[m] / sum_active_weights) * raw_probs[m] for m in active_models)
             final_prob = min(max(int(final_prob), 0), 100)
-            
-            if district["id"] == "sovetskiy":
-                target = 100.0 if real_rain_fact > 0 else 0.0
-                total_w = 0.0
-                for m in ALL_7_MODELS:
-                    if m in active_models:
-                        error = abs(raw_probs[m] - target) / 100.0
-                        weights[m] = weights[m] * (1.0 - 0.05 * error)
-                    if weights[m] < 0.02: weights[m] = 0.02
-                    total_w += weights[m]
-                for m in ALL_7_MODELS: weights[m] /= total_w
-                st.session_state.model_weights = weights
         else:
-            final_prob = random.randint(15, 65)
+            final_prob = 0 # Больше никакого random! Честный ноль, если интернета нет совсем.
 
         if final_prob > 70: rec = "⚠️ Критический риск ливня. Ансамбль рекомендует взять зонт."
         elif final_prob > 40: rec = "🌧️ Повышенная вероятность осадков. Расчёт выполнен по active-каналам."
@@ -144,7 +128,7 @@ def fetch_live_radar_data():
                 "fallback_7timer": "Резервный Шлюз (7timer)"
             }[m]
             val_str = f"{raw_probs[m]}%" if raw_probs[m] is not None else "⚠️ Исключен из расчета"
-            sources_display[ru_name] = f"Прогноз: {val_str} (Текущий вес: {round(weights[m]*100, 1)}%)"
+            sources_display[ru_name] = f"Прогноз: {val_str} (Текущий вес: {round(current_weights[m]*100, 1)}%)"
 
         updated_forecast.append({
             "district_name": district["name"],
@@ -160,8 +144,9 @@ try:
     with open("ufa_districts.geojson", "r", encoding="utf-8") as f:
         ufa_geo_data = json.load(f)
         
-    forecast_data, telemetry_data = fetch_live_radar_data()
-    status_placeholder.success("🟢 Спутниковые данные и телеметрия успешно получены напрямую с серверов Google!")
+    # Вызываем кэшированную версию сбора данных
+    forecast_data, telemetry_data = fetch_live_radar_data_cached(weights)
+    status_placeholder.success("🟢 Спутниковые данные успешно загружены из стабильного часового кэша!")
     
     name_risk_dict = {dist["district_name"]: dist["rain_probability_percent"] for dist in forecast_data}
     
@@ -186,9 +171,10 @@ try:
         tooltip=folium.GeoJsonTooltip(fields=["name"], aliases=["Район Уфы:"], style="font-family: sans-serif; font-size: 13px;")
     ).add_to(m)
     
-    st_folium(m, width=900, height=520, key="ufa_monolith_direct_map_v6")
+    # Ключ зафиксирован на v7, чтобы закрепить кэшированное состояние карты
+    st_folium(m, width=900, height=520, key="ufa_stable_cached_map_v7")
     
-    # ПАНЕЛЬ ТЕЛЕМЕТРИИ С НАСТОЯЩИМИ СТАТУСАМИ
+    # ПАНЕЛЬ ТЕЛЕМЕТРИИ
     st.markdown("### 🖥️ Поканальный отладочный статус 7 независимых метео-серверов")
     cols = st.columns(7)
     models_keys = [
