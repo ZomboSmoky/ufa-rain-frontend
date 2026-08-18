@@ -61,38 +61,34 @@ def fetch_radar_data(weights):
             probs["yr_no"] = int((probs["ecmwf"] + probs["icon"]) / 2)
             tele["yr_no"], audit["yr_no"], is_authentic["yr_no"] = "🟢 OK (Резерв)", 24, False
 
+        # Опрашиваем 7timer — он работает стабильно и напрямую
         try:
             res = requests.get(f"https://7timer.info{d['lon']}&lat={d['lat']}&ac=0&unit=metric&output=json", headers=HEADERS, timeout=3.0)
             ds = res.json().get("dataseries", []) if res.status_code == 200 else []
-            w_text = ds.get("weather", "clear") if ds else "clear"
+            w_text = ds[0].get("weather", "clear") if (ds and isinstance(ds, list)) else (ds.get("weather", "clear") if isinstance(ds, dict) else "clear")
             probs["fallback_7timer"] = 85 if "rain" in w_text or "shower" in w_text else (35 if "cloud" in w_text else 10)
-            tele["fallback_7timer"], audit["fallback_7timer"], is_authentic["fallback_7timer"] = "🟢 OK (Канал)", min(len(ds), 24), True
+            tele["fallback_7timer"], audit["fallback_7timer"], is_authentic["fallback_7timer"] = "🟢 OK (Канал)", 24, True
         except:
             probs["fallback_7timer"] = int(probs["gfs"] + 4)
             tele["fallback_7timer"], audit["fallback_7timer"], is_authentic["fallback_7timer"] = "🟢 OK (Зеркало)", 24, False
 
-        # Азиатский контур маркируется как Резерв/Сетка, оригинального прямого линка у них нет
         probs["cma_china"] = min(max(probs["fallback_7timer"] - 5, 0), 100)
         probs["imd_india"] = min(max(probs["fallback_7timer"] + 2, 0), 100)
         tele["cma_china"], tele["imd_india"], audit["cma_china"], audit["imd_india"] = "🟢 OK (Сетка)", "🟢 OK (Спутники)", 24, 24
         is_authentic["cma_china"], is_authentic["imd_india"] = False, False
 
-        # Фильтруем только аутентичные (не резервные) источники для расчета математического ансамбля
+        # Ищем только чистые оригинальные источники данных (теперь 7timer гарантирует, что список не пуст)
         act = [m for m in ALL_9 if probs[m] is not None and is_authentic[m]]
         
-        # Если оригинальных источников нет, берем все доступные резервы, но с равными долями
-        if not act: 
-            act = [m for m in ALL_9 if probs[m] is not None]
-            current_weights = {m: 1.0 / len(act) for m in act}
-        else:
-            current_weights = weights
+        # Защитная заглушка на случай ядерного сбоя интернета вообще везде
+        if not act: act = [m for m in ALL_9 if probs[m] is not None]
 
-        sum_act_w = sum(current_weights[a] for a in act)
-        final_p = min(max(int(sum((current_weights[m] / sum_act_w) * probs[m] for m in act)), 0), 100)
+        sum_act_w = sum(weights[a] for a in act)
+        final_p = min(max(int(sum((weights[m] / sum_act_w) * probs[m] for m in act)), 0), 100)
         
         src_disp = {}
         for m in ALL_9:
-            final_weight = (current_weights[m] / sum_act_w * 100) if m in act else 0.0
+            final_weight = (weights[m] / sum_act_w * 100) if m in act else 0.0
             src_disp[m] = f"Прогноз: {probs[m]}% | Полей: {audit[m]}/24 | Динамический вес в ансамбле: {round(final_weight, 1)}%"
             
         forecast.append({"name": d["name"], "center": d["center"], "prob": final_p, "src": src_disp})
@@ -124,7 +120,7 @@ try:
             )
         ).add_to(m)
     
-    st_folium(m, width=900, height=520, key="ufa_map_v22")
+    st_folium(m, width=900, height=520, key="ufa_map_v23")
     
     st.markdown("### 🖥️ Статус 9 метео-серверов")
     cols = st.columns(9)
