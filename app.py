@@ -4,7 +4,7 @@ import folium
 from streamlit_folium import st_folium
 import json
 
-st.set_page_config(page_title="Радар Уфы — Реальные Районы", layout="wide", page_icon="🌧️")
+st.set_page_config(page_title="Радар Уфы — Реальная Топография", layout="wide", page_icon="🌧️")
 
 st.title("🌧️ Микролокальный погодный радар Уфы")
 st.subheader("Высокоточный анализ рисков осадков по официальным границам районов города")
@@ -15,7 +15,7 @@ API_URL = "https://ufa-rain-backend-1.onrender.com/api/v1/forecast"
 status_placeholder = st.info("⏳ Синхронизация со спутниковыми данными...")
 
 try:
-    # Загружаем реальные асимметричные границы районов Уфы
+    # Загружаем реальные административные границы районов Уфы
     with open("ufa_districts.geojson", "r", encoding="utf-8") as f:
         ufa_geo_data = json.load(f)
         
@@ -47,7 +47,7 @@ try:
                 "fillOpacity": 0.45  
             }
 
-        # Накладываем выверенную GeoJSON сетку
+        # Отрисовываем детализированную сетку GeoJSON
         folium.GeoJson(
             ufa_geo_data,
             style_function=style_district,
@@ -58,8 +58,8 @@ try:
             )
         ).add_to(m)
         
-        # Новый уникальный ключ карты для полного сброса круглого кэша
-        st_folium(m, width=900, height=520, key="ufa_industrial_geojson_v1")
+        # Новый ключ карты для полной очистки круглого кэша
+        st_folium(m, width=900, height=520, key="ufa_true_topography_v1")
         
         st.markdown("### 📊 Метеосводка по секторам")
         for dist in forecast_data:
