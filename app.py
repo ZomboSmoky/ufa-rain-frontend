@@ -9,6 +9,8 @@ st.set_page_config(page_title="Радар Уфы — Браузерный Анс
 st.title("🌧️ Микролокальный погодный радар Уфы")
 st.subheader("Автономный обход облачных блокировок через прямое браузерное сканирование (Client-Side Fetching)")
 
+status_placeholder = st.info("⏳ Загрузка метеоданных из кэша системы...")
+
 # --- БАЗОВЫЕ НАСТРОЙКИ ГОРОДА ---
 OFFICIAL_DISTRICTS = [
     {"id": "demskiy", "name": "Дёмский район", "lat": 54.693, "lon": 55.811},
@@ -27,7 +29,6 @@ if "model_weights" not in st.session_state:
 weights = st.session_state.model_weights
 
 # --- ШАГ 1: JAVASCRIPT-ИНЖЕКТОР ДЛЯ ОПРОСА API ИЗ БРАУЗЕРА ПОЛЬЗОВАТЕЛЯ ---
-# Этот невидимый скрипт скачивает погоду через ваш чистый домашний/мобильный IP-адрес
 js_worker_code = f"""
 <script>
 async function getRadarData() {{
@@ -41,7 +42,6 @@ async function getRadarData() {{
     for (let d of districts) {{
         let raw_probs = {{}};
         
-        // 1. Запрос базового времени Уфы
         let timeStr = null;
         try {{
             let tRes = await fetch(`https://open-meteo.com{{d.lat}}&longitude=${{d.lon}}&current=time&timezone=auto`);
@@ -51,7 +51,6 @@ async function getRadarData() {{
             }}
         }} catch(e) {{}}
 
-        // 2. Поканальный опрос Open-Meteo
         const models = {{
             "ecmwf": "ecmwf_ifs", "gfs": "gfs_seamless", "icon": "icon_seamless",
             "arome": "meteofrance_arome", "jma": "jma_seamless"
@@ -76,24 +75,23 @@ async function getRadarData() {{
             }} catch(e) {{}}
         }}
 
-        // 3. Расчет Yr.no
         if (raw_probs["ecmwf"] !== undefined && raw_probs["icon"] !== undefined) {{
             raw_probs["yr_no"] = Math.round((raw_probs["ecmwf"] + raw_probs["icon"]) / 2);
             telemetry["yr_no"] = "🟢 OK (Авторасчет)";
         }}
 
-        // 4. Опрос независимого 7timer
         try {{
             let fbUrl = `https://7timer.info{{d.lon}}&lat=${{d.lat}}&ac=0&unit=metric&output=json`;
             let fbRes = await fetch(fbUrl);
             if (fbRes.ok) {{
                 let fbData = await fbRes.json();
-                let nextW = fbData?.dataseries?.[0]?.weather || "clear";
+                let dataseries = fbData?.dataseries || [];
+                let nextW = (dataseries.length > 0) ? (dataseries[0].weather || "clear") : "clear";
                 let fbProb = 0;
                 if (nextW.includes("rain") || nextW.includes("shower")) fbProb = 85;
                 else if (nextW.includes("cloud")) fbProb = 35;
                 
-                raw_probs["fallback_7timer"] = fb_prob;
+                raw_probs["fallback_7timer"] = fbProb;
                 telemetry["fallback_7timer"] = "🟢 OK (Резервный канал браузера)";
             }}
         }} catch(e) {{}}
@@ -104,7 +102,6 @@ async function getRadarData() {{
         }});
     }}
 
-    // Отправляем собранные данные обратно в Python-движок Streamlit
     parent.postMessage({{
         type: "streamlit:setComponentValue",
         value: {{ "forecasts": results, "telemetry": telemetry }}
@@ -114,7 +111,7 @@ getRadarData();
 </script>
 """
 
-# Невидимо монтируем скрипт в самом верху страницы
+# Безопасное монтирование js-скрипта
 receiver = components.html(js_worker_code, height=0, width=0)
 
 # --- ШАГ 2: ОБРАБОТКА ДАННЫХ В PYTHON ПОСЛЕ СБОРА БРАУЗЕРОМ ---
@@ -122,25 +119,26 @@ try:
     with open("ufa_districts.geojson", "r", encoding="utf-8") as f:
         ufa_geo_data = json.load(f)
 
-    # Если браузер еще не успел вернуть данные, выводим красивый спиннер загрузки
-    if receiver is None:
+    # Защищенное извлечение данных без использования метода .get() нарушающего синтаксис Streamlit
+    if receiver is None or not hasattr(receiver, "value") or receiver.value is None:
         st.warning("⏳ Браузер устанавливает прямое локальное соединение со спутниками... Подождите 3 секунды.")
         st.stop()
 
-    forecast_raw = receiver.get("forecasts", [])
-    telemetry_data = receiver.get("telemetry", {})
+    browser_data = receiver.value
+    forecast_raw = browser_data.get("forecasts", [])
+    telemetry_data = browser_data.get("telemetry", {})
 
     if not forecast_raw:
-        st.warning("🔄 Инициализация сетевых шлюзов. Если таблица пуста, обновите страницу кнопкой сверху.")
+        st.warning("🔄 Инициализация сетевых шлюзов. Страница обновится автоматически.")
         st.stop()
 
-    st.success("🟢 Прямой браузерный обход активирован! Данные получены в обход серверов Google/Render.")
+    status_placeholder.success("🟢 Прямой браузерный обход активирован! Данные получены в обход серверов Google/Render.")
 
-    # Вычисляем финальный математический ансамбль в Python на основе браузерных данных
+    # Вычисляем финальный математический ансамбль в Python
     forecast_data = []
     for item in forecast_raw:
-        r_probs = item["raw_probs"]
-        name = item["district_name"]
+        r_probs = item.get("raw_probs", {})
+        name = item.get("district_name", "")
         
         active_models = [m for m in ALL_7_MODELS if r_probs.get(m) is not None]
         
@@ -182,9 +180,9 @@ try:
             osm_name = f"{osm_name} район"
             
         prob = name_risk_dict.get(osm_name, 0.0)
-        if prob > 70: color = "#1f1fc2"      # Синий
-        elif prob > 40: color = "#6ba1ff"    # Голубой
-        else: color = "#47c95e"              # Зеленый
+        if prob > 70: color = "#1f1fc2"
+        elif prob > 40: color = "#6ba1ff"
+        else: color = "#47c95e"
         return {"fillColor": color, "color": "#1a1a1a", "weight": 2.5, "fillOpacity": 0.55}
 
     folium.GeoJson(
@@ -193,7 +191,7 @@ try:
         tooltip=folium.GeoJsonTooltip(fields=["name"], aliases=["Район Уфы:"], style="font-family: sans-serif; font-size: 13px;")
     ).add_to(m)
     
-    st_folium(m, width=900, height=520, key="ufa_browser_fetching_map_v9")
+    st_folium(m, width=900, height=520, key="ufa_browser_fetching_map_v10")
     
     # ПАНЕЛЬ ТЕЛЕМЕТРИИ
     st.markdown("### 🖥️ Поканальный отладочный статус 7 независимых метео-серверов")
