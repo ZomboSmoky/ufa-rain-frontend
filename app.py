@@ -4,7 +4,7 @@ from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Динамический ансамбль 9 источников с адаптивным распределением весов")
+st.subheader("Динамический ансамбль 9 источников с визуальным разделением Оригинал / Резерв")
 
 status_ph = st.info("⏳ Синхронизация спутниковых потоков и аудит метеополей...")
 
@@ -29,6 +29,9 @@ w = st.session_state.w9
 def fetch_radar_data(weights):
     forecast, tele, audit = [], {m: "🔴 Недоступен" for m in ALL_9}, {m: 0 for m in ALL_9}
     
+    # Флаги аутентичности для панели серверов (глобальные для сессии)
+    global_authentic = {m: False for m in ALL_9}
+    
     for d in DISTRICTS:
         probs, t_str, idx = {m: None for m in ALL_9}, None, 0
         is_authentic = {m: False for m in ALL_9}
@@ -48,56 +51,68 @@ def fetch_radar_data(weights):
                     p_arr = h_data.get(f"precipitation_probability_{api_name}", [])
                     if p_arr:
                         probs[m_id] = int(p_arr[idx])
-                        tele[m_id], audit[m_id], is_authentic[m_id] = "🟢 OK (Линк)", min(len(p_arr), 24), True
+                        tele[m_id], audit[m_id], is_authentic[m_id] = "🟢 ОРИГИНАЛ", min(len(p_arr), 24), True
+                        global_authentic[m_id] = True
                 else: raise Exception()
             except:
                 probs[m_id] = int((d['lat'] * 100 + d['lon'] * 50) % 40)
-                tele[m_id], audit[m_id], is_authentic[m_id] = "🟢 OK (Резерв)", 24, False
+                tele[m_id], audit[m_id], is_authentic[m_id] = "🟡 РЕЗЕРВ (0% веса)", 24, False
 
         if probs["ecmwf"] is not None and is_authentic["ecmwf"] and is_authentic["icon"]:
             probs["yr_no"] = int((probs["ecmwf"] + probs["icon"]) / 2)
-            tele["yr_no"], audit["yr_no"], is_authentic["yr_no"] = "🟢 OK (Авто)", audit["ecmwf"], True
+            tele["yr_no"], audit["yr_no"], is_authentic["yr_no"] = "🟢 ОРИГИНАЛ", audit["ecmwf"], True
+            global_authentic["yr_no"] = True
         else:
             probs["yr_no"] = int((probs["ecmwf"] + probs["icon"]) / 2)
-            tele["yr_no"], audit["yr_no"], is_authentic["yr_no"] = "🟢 OK (Резерв)", 24, False
+            tele["yr_no"], audit["yr_no"], is_authentic["yr_no"] = "🟡 РЕЗЕРВ (0% веса)", 24, False
 
-        # Опрашиваем 7timer — он работает стабильно и напрямую
         try:
             res = requests.get(f"https://7timer.info{d['lon']}&lat={d['lat']}&ac=0&unit=metric&output=json", headers=HEADERS, timeout=3.0)
             ds = res.json().get("dataseries", []) if res.status_code == 200 else []
-            w_text = ds[0].get("weather", "clear") if (ds and isinstance(ds, list)) else (ds.get("weather", "clear") if isinstance(ds, dict) else "clear")
+            w_text = ds.get("weather", "clear") if (ds and isinstance(ds, list)) else (ds.get("weather", "clear") if isinstance(ds, dict) else "clear")
             probs["fallback_7timer"] = 85 if "rain" in w_text or "shower" in w_text else (35 if "cloud" in w_text else 10)
-            tele["fallback_7timer"], audit["fallback_7timer"], is_authentic["fallback_7timer"] = "🟢 OK (Канал)", 24, True
+            tele["fallback_7timer"], audit["fallback_7timer"], is_authentic["fallback_7timer"] = "🟢 ОРИГИНАЛ", 24, True
+            global_authentic["fallback_7timer"] = True
         except:
             probs["fallback_7timer"] = int(probs["gfs"] + 4)
-            tele["fallback_7timer"], audit["fallback_7timer"], is_authentic["fallback_7timer"] = "🟢 OK (Зеркало)", 24, False
+            tele["fallback_7timer"], audit["fallback_7timer"], is_authentic["fallback_7timer"] = "🟡 РЕЗЕРВ (0% веса)", 24, False
 
+        # Маркируем КНР и Индию как резервные по умолчанию
         probs["cma_china"] = min(max(probs["fallback_7timer"] - 5, 0), 100)
         probs["imd_india"] = min(max(probs["fallback_7timer"] + 2, 0), 100)
-        tele["cma_china"], tele["imd_india"], audit["cma_china"], audit["imd_india"] = "🟢 OK (Сетка)", "🟢 OK (Спутники)", 24, 24
+        tele["cma_china"], tele["imd_india"], audit["cma_china"], audit["imd_india"] = "🟡 РЕЗЕРВ (0% веса)", "🟡 РЕЗЕРВ (0% веса)", 24, 24
         is_authentic["cma_china"], is_authentic["imd_india"] = False, False
 
-        # Ищем только чистые оригинальные источники данных (теперь 7timer гарантирует, что список не пуст)
+        # ЖЕСТКИЙ МАТЕМАТИЧЕСКИЙ АНСАМБЛЬ: Считаем веса ТОЛЬКО для True-источников
         act = [m for m in ALL_9 if probs[m] is not None and is_authentic[m]]
         
-        # Защитная заглушка на случай ядерного сбоя интернета вообще везде
-        if not act: act = [m for m in ALL_9 if probs[m] is not None]
-
-        sum_act_w = sum(weights[a] for a in act)
-        final_p = min(max(int(sum((weights[m] / sum_act_w) * probs[m] for m in act)), 0), 100)
-        
-        src_disp = {}
-        for m in ALL_9:
-            final_weight = (weights[m] / sum_act_w * 100) if m in act else 0.0
-            src_disp[m] = f"Прогноз: {probs[m]}% | Полей: {audit[m]}/24 | Динамический вес в ансамбле: {round(final_weight, 1)}%"
+        # Если оригиналов нет совсем (тотальный бан), берем резервы, но делим веса поровну
+        if not act:
+            act_backup = [m for m in ALL_9 if probs[m] is not None]
+            sum_act_w = sum(weights[a] for a in act_backup)
+            final_p = min(max(int(sum((weights[m] / sum_act_w) * probs[m] for m in act_backup)), 0), 100)
+            src_disp = {m: f"Прогноз: {probs[m]}% | Полей: {audit[m]}/24 | Вес в ансамбле: {round(weights[m]/sum_act_w*100, 1)}% (Включен аварийный режим)" for m in ALL_9}
+        else:
+            sum_act_w = sum(weights[a] for a in act)
+            final_p = min(max(int(sum((weights[m] / sum_act_w) * probs[m] for m in act)), 0), 100)
+            src_disp = {}
+            for m in ALL_9:
+                final_weight = (weights[m] / sum_act_w * 100) if is_authentic[m] else 0.0
+                src_disp[m] = f"Прогноз: {probs[m]}% | Полей: {audit[m]}/24 | Динамический вес в ансамбле: {round(final_weight, 1)}%"
             
         forecast.append({"name": d["name"], "center": d["center"], "prob": final_p, "src": src_disp})
+        
+    # Синхронизируем глобальные статусы для верхней панели
+    for m in ALL_9:
+        if not global_authentic[m]:
+            tele[m] = "🟡 РЕЗЕРВ (0% веса)"
+            
     return forecast, tele, audit
 
 try:
     with open("ufa_districts.geojson", "r", encoding="utf-8") as f: ufa_geo = json.load(f)
     fdata, tdata, adata = fetch_radar_data(w)
-    st.success("🟢 Все 9 независимых систем синхронизированы!")
+    status_ph.success("🟢 Метеокомпоненты успешно обработаны ядром системы!")
     
     r_dict = {dist["name"]: dist["prob"] for dist in fdata}
     m = folium.Map(location=[54.745, 55.960], zoom_start=11, tiles="cartodbpositron")
@@ -120,20 +135,25 @@ try:
             )
         ).add_to(m)
     
-    st_folium(m, width=900, height=520, key="ufa_map_v23")
+    st_folium(m, width=900, height=520, key="ufa_map_v24")
     
-    st.markdown("### 🖥️ Статус 9 метео-серверов")
+    st.markdown("### 🖥️ Текущий статус оригинальности метео-серверов")
     cols = st.columns(9)
     labels = [
         ("ecmwf", "ECMWF"), ("gfs", "GFS"), ("icon", "ICON"), 
         ("arome", "France"), ("jma", "JMA"), ("yr_no", "Yr.no"), 
-        ("cma_china", "CMA"), ("imd_india", "IMD"), ("fallback_7timer", "Резерв")
+        ("cma_china", "CMA"), ("imd_india", "IMD"), ("fallback_7timer", "7timer")
     ]
     for i, (k, lbl) in enumerate(labels):
-        with cols[i]: st.info(f"**{lbl}**\n\n{tdata.get(k, '🟢 OK')}\n\n📊 Пул: {adata.get(k, 24)}/24")
+        status_text = tdata.get(k, "")
+        with cols[i]:
+            if "ОРИГИНАЛ" in status_text:
+                st.success(f"**{lbl}**\n\n{status_text}\n\n📊 Пул: {adata.get(k, 24)}/24")
+            else:
+                st.warning(f"**{lbl}**\n\n{status_text}\n\n📊 Пул: {adata.get(k, 24)}/24")
 
-    st.markdown("### 📊 Метеосводка по районам")
+    st.markdown("### 📊 Метеосводка по районам (Анализ математических весов)")
     for dist in fdata:
         with st.expander(f"📍 {dist['name']} — **{dist['prob']}% риск дождя**"): st.json(dist['src'])
 except Exception as e:
-    st.error(f"🔴 Ошибка контура: {e}")
+    status_ph.error(f"🔴 Ошибка контура: {e}")
