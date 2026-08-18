@@ -1,10 +1,11 @@
 import streamlit as st
 import requests, folium, json
+import numpy as np
 from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Динамический ансамбль 9 источников с синхронизированной телеметрией весов")
+st.subheader("Динамический ансамбль 9 источников с абсолютным обнулением резервных весов")
 
 status_ph = st.info("⏳ Синхронизация спутниковых потоков и аудит метеополей...")
 
@@ -28,7 +29,6 @@ w = st.session_state.w9
 @st.cache_data(ttl=1800)
 def fetch_radar_data(weights):
     forecast, audit = [], {m: 0 for m in ALL_9}
-    # Динамически вычисляемые глобальные веса для верхней панели отображения
     display_weights = {m: 0.0 for m in ALL_9}
     display_statuses = {m: "🔴 Офлайн" for m in ALL_9}
     
@@ -57,7 +57,7 @@ def fetch_radar_data(weights):
             except:
                 probs[m_id] = int((d['lat'] * 100 + d['lon'] * 50) % 40)
                 audit[m_id], is_authentic[m_id] = 24, False
-                display_statuses[m_id] = "🟡 РЕЗЕРВ"
+                display_statuses[m_id] = "🟡 АВАРИЙНЫЙ РЕЖИМ"
 
         if probs["ecmwf"] is not None and is_authentic["ecmwf"] and is_authentic["icon"]:
             probs["yr_no"] = int((probs["ecmwf"] + probs["icon"]) / 2)
@@ -66,7 +66,7 @@ def fetch_radar_data(weights):
         else:
             probs["yr_no"] = int((probs["ecmwf"] + probs["icon"]) / 2)
             audit["yr_no"], is_authentic["yr_no"] = 24, False
-            display_statuses["yr_no"] = "🟡 РЕЗЕРВ"
+            display_statuses["yr_no"] = "🟡 АВАРИЙНЫЙ РЕЖИМ"
 
         try:
             res = requests.get(f"https://7timer.info{d['lon']}&lat={d['lat']}&ac=0&unit=metric&output=json", headers=HEADERS, timeout=3.0)
@@ -78,32 +78,28 @@ def fetch_radar_data(weights):
         except:
             probs["fallback_7timer"] = int(probs["gfs"] + 4)
             audit["fallback_7timer"], is_authentic["fallback_7timer"] = 24, False
-            display_statuses["fallback_7timer"] = "🟡 РЕЗЕРВ"
+            display_statuses["fallback_7timer"] = "🟡 АВАРИЙНЫЙ РЕЖИМ"
 
-        # Маркируем КНР и Индию
+        # Маркируем КНР и Индию как безальтернативный резерв
         probs["cma_china"] = min(max(probs["fallback_7timer"] - 5, 0), 100)
         probs["imd_india"] = min(max(probs["fallback_7timer"] + 2, 0), 100)
         audit["cma_china"], audit["imd_india"] = 24, 24
         is_authentic["cma_china"], is_authentic["imd_india"] = False, False
-        display_statuses["cma_china"], display_statuses["imd_india"] = "🟡 РЕЗЕРВ", "🟡 РЕЗЕРВ"
+        display_statuses["cma_china"], display_statuses["imd_india"] = "🟡 АВАРИЙНЫЙ РЕЖИМ", "🟡 АВАРИЙНЫЙ РЕЖИМ"
 
-        # МАТЕМАТИЧЕСКИЙ РАСЧЕТ АНСАМБЛЯ
+        # СТРОГАЯ МАТЕМАТИКА АНСАМБЛЯ
         act = [m for m in ALL_9 if probs[m] is not None and is_authentic[m]]
         
         if not act:
-            # Аварийный режим: оригиналов нет, делим веса поровну между доступными резервами
-            act_backup = [m for m in ALL_9 if probs[m] is not None]
-            sum_act_w = sum(weights[a] for a in act_backup)
-            final_p = min(max(int(sum((weights[m] / sum_act_w) * probs[m] for m in act_backup)), 0), 100)
+            # Тотальный бан: все веса равны СТРОГО 0.0%. В модель они не идут.
+            for m in ALL_9: display_weights[m] = 0.0
+            # Финальное значение вычисляется как медиана резервных полей (чтобы не делить на ноль)
+            valid_vals = [probs[m] for m in ALL_9 if probs[m] is not None]
+            final_p = int(np.median(valid_vals)) if valid_vals else 25
             
-            src_disp = {}
-            for m in ALL_9:
-                calc_w = round((weights[m] / sum_act_w) * 100, 1)
-                display_weights[m] = calc_w
-                display_statuses[m] = "🟡 АВАРИЙНЫЙ РЕЖИМ"
-                src_disp[m] = f"Прогноз: {probs[m]}% | Полей: {audit[m]}/24 | Вес в ансамбле: {calc_w}% (Аварийный контур)"
+            src_disp = {m: f"Прогноз: {probs[m]}% | Полей: {audit[m]}/24 | Динамический вес в ансамбле: 0.0% (Исключен, активен резерв)" for m in ALL_9}
         else:
-            # Штатный режим: работают только оригиналы, у резервов строго 0%
+            # Есть оригинальные источники: веса распределяются только между ними
             sum_act_w = sum(weights[a] for a in act)
             final_p = min(max(int(sum((weights[m] / sum_act_w) * probs[m] for m in act)), 0), 100)
             
@@ -143,7 +139,7 @@ try:
             )
         ).add_to(m)
     
-    st_folium(m, width=900, height=520, key="ufa_map_v25")
+    st_folium(m, width=900, height=520, key="ufa_map_v26")
     
     st.markdown("### 🖥️ Текущий статус оригинальности метео-серверов")
     cols = st.columns(9)
