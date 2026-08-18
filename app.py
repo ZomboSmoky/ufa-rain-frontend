@@ -4,7 +4,7 @@ import folium
 from streamlit_folium import st_folium
 import json
 
-st.set_page_config(page_title="Радар Уфы — Мониторинг систем", layout="wide", page_icon="🌧️")
+st.set_page_config(page_title="Радар Уфы — Телеметрия", layout="wide", page_icon="🌧️")
 
 st.title("🌧️ Микролокальный погодный радар Уфы")
 st.subheader("Высокоточный анализ рисков осадков с поканальной отладкой источников")
@@ -19,8 +19,12 @@ try:
     response = requests.get(API_URL, timeout=12)
     
     if response.status_code == 200:
-        forecast_data = response.json()
+        root_data = response.json()
         status_placeholder.success("🟢 Телеметрия успешно получена с сервера бэкенда!")
+        
+        # Безопасно достаем списки прогнозов и телеметрии из корня JSON
+        forecast_data = root_data.get("forecasts", [])
+        telemetry_data = root_data.get("telemetry", {})
         
         risk_dict = {dist["district_id"]: dist["rain_probability_percent"] for dist in forecast_data}
         
@@ -40,25 +44,23 @@ try:
             tooltip=folium.GeoJsonTooltip(fields=["name"], aliases=["Район:"], style="font-family: sans-serif; font-size: 13px;")
         ).add_to(m)
         
-        st_folium(m, width=900, height=520, key="ufa_debug_telemetry_map_v2")
+        st_folium(m, width=900, height=520, key="ufa_root_fixed_map_v3")
         
-        # ВЫВОДИМ ДИАГНОСТИЧЕСКУЮ СТРОКУ МОНИТОРИНГА ИСТОЧНИКОВ
+        # ОТЛАДОЧНЫЙ МОНИТОРИНГ ИСТОЧНИКОВ
         st.markdown("### 🖥️ Поканальный отладочный статус метео-серверов")
-        if forecast_data:
-            # Берем логи первого района (Советского) для вывода общего статуса
-            debug_info = forecast_data[0].get("debug_info", {})
-            
-            cols = st.columns(6)
-            models_keys = [("ecmwf", "ECMWF (Европа)"), ("gfs", "GFS (США)"), ("icon", "ICON (Германия)"), 
-                           ("arome", "France (Франция)"), ("jma", "JMA (Япония)"), ("yr_no", "Yr.no (Норвегия)")]
-            
-            for i, (key, label) in enumerate(models_keys):
-                status_text = debug_info.get(key, "🔴 Данные отсутствуют")
-                with cols[i]:
-                    if "🟢" in status_text:
-                        st.success(f"**{label}**\n\n{status_text}")
-                    else:
-                        st.error(f"**{label}**\n\n{status_text}")
+        cols = st.columns(6)
+        models_keys = [
+            ("ecmwf", "ECMWF (Европа)"), ("gfs", "GFS (США)"), ("icon", "ICON (Германия)"), 
+            ("arome", "France (Франция)"), ("jma", "JMA (Япония)"), ("yr_no", "Yr.no (Норвегия)")
+        ]
+        
+        for i, (key, label) in enumerate(models_keys):
+            status_text = telemetry_data.get(key, "🔴 Данные отсутствуют")
+            with cols[i]:
+                if "🟢" in status_text:
+                    st.success(f"**{label}**\n\n{status_text}")
+                else:
+                    st.error(f"**{label}**\n\n{status_text}")
 
         st.markdown("### 📊 Метеосводка и прогнозы по районам")
         for dist in forecast_data:
