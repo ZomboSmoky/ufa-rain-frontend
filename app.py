@@ -4,18 +4,18 @@ import folium
 from streamlit_folium import st_folium
 import json
 
-st.set_page_config(page_title="Радар Уфы — Реальные Границы", layout="wide", page_icon="🌧️")
+st.set_page_config(page_title="Радар Уфы — Реальные Районы", layout="wide", page_icon="🌧️")
 
 st.title("🌧️ Микролокальный погодный радар Уфы")
 st.subheader("Высокоточный анализ рисков осадков по официальным границам районов города")
 
-# АДРЕС УКАЗАН СТРОГО В ТЕКУЩЕЙ СТРОКЕ:
+# АДРЕС УКАЗАН ПОЛНОСТЬЮ И СТРОГО КОРРЕКТНО:
 API_URL = "https://ufa-rain-backend-1.onrender.com/api/v1/forecast"
 
 status_placeholder = st.info("⏳ Синхронизация со спутниковыми данными...")
 
 try:
-    # Загружаем точные внешние границы районов Уфы из нашего GeoJSON файла
+    # Загружаем реальные асимметричные границы районов Уфы
     with open("ufa_districts.geojson", "r", encoding="utf-8") as f:
         ufa_geo_data = json.load(f)
         
@@ -25,18 +25,14 @@ try:
         forecast_data = response.json()
         status_placeholder.success("🟢 Интерактивная карта успешно построена по реальным контурам Уфы!")
         
-        # Перехватываем риски осадков из бэкенда
         risk_dict = {dist["district_id"]: dist["rain_probability_percent"] for dist in forecast_data}
         
-        # Создаем карту Folium, центрированную на Уфе
         m = folium.Map(location=[54.745, 55.960], zoom_start=11, tiles="cartodbpositron")
         
-        # Функция интеллектуальной заливки реальных контуров
         def style_district(feature):
             district_id = feature["id"]
             prob = risk_dict.get(district_id, 0.0)
             
-            # Логика смены цвета: Ливень -> Синий, Морось -> Голубой, Сухо -> Приятный Зеленый
             if prob > 70:
                 color = "#1f1fc2"  
             elif prob > 40:
@@ -46,12 +42,12 @@ try:
                 
             return {
                 "fillColor": color,
-                "color": "#2c2c2c",  # Четкие темно-серые границы
-                "weight": 2.5,       # Толщина линий границ
-                "fillOpacity": 0.45  # Прозрачность заливки
+                "color": "#1a1a1a",  
+                "weight": 3,         
+                "fillOpacity": 0.45  
             }
 
-        # Накладываем высокоточную внешнюю сетку на карту
+        # Накладываем выверенную GeoJSON сетку
         folium.GeoJson(
             ufa_geo_data,
             style_function=style_district,
@@ -62,8 +58,8 @@ try:
             )
         ).add_to(m)
         
-        # Рендеринг карты
-        st_folium(m, width=900, height=520, key="ufa_exact_shapes_map_fixed_final")
+        # Новый уникальный ключ карты для полного сброса круглого кэша
+        st_folium(m, width=900, height=520, key="ufa_industrial_geojson_v1")
         
         st.markdown("### 📊 Метеосводка по секторам")
         for dist in forecast_data:
