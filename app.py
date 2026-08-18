@@ -9,7 +9,7 @@ st.title("🌧️ Система микролокального прогноза
 st.subheader("Анализ данных Яндекс.Погода, AccuWeather и Apple WeatherKit")
 
 # ЗАМЕНИТЕ ЭТУ ССЫЛКУ НА ВАШУ ССЫЛКУ ИЗ RENDER (Обязательно оставьте /api/v1/forecast на конце)
-API_URL = "https://ufa-rain-backend.onrender.com/"
+API_URL = "https://ufa-rain-backend.onrender.com/api/v1/forecast"
 
 DISTRICT_COORDS = {
     "chernikovka": [54.8122, 56.0915],
