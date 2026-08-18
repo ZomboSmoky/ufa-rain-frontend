@@ -12,7 +12,7 @@ st.subheader("Высокоточный анализ рисков осадков 
 
 status_placeholder = st.info("⏳ Запуск прямого спутникового сканирования и опрос метео-моделей...")
 
-# --- АРХИТЕКТУРНАЯ БАЗА ДАННЫХ И НАСТРОЙКИ (БЫВШИЙ БЭКЕНД) ---
+# --- АРХИТЕКТУРНАЯ БАЗА ДАННЫХ И НАСТРОЙКИ ---
 OFFICIAL_DISTRICTS = [
     {"id": "demskiy", "name": "Дёмский район", "lat": 54.693, "lon": 55.811},
     {"id": "kalininskiy", "name": "Калининский район", "lat": 54.831, "lon": 56.126},
@@ -31,18 +31,17 @@ MODELS_CONFIG = {
 ALL_7_MODELS = ["ecmwf", "gfs", "icon", "arome", "jma", "yr_no", "fallback_7timer"]
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
-# Используем встроенный кэш Streamlit для хранения весов моделей (вместо weights.json)
+# Использование встроенного кэша весов
 if "model_weights" not in st.session_state:
     st.session_state.model_weights = {m: 1.0 / len(ALL_7_MODELS) for m in ALL_7_MODELS}
 
 weights = st.session_state.model_weights
 
-# --- ФУНКЦИЯ ПРЯМОГО СБОРА ДАННЫХ С МЕТЕО-СЕРВЕРОВ ---
+# --- ФУНКЦИЯ СБОРА ДАННЫХ ---
 def fetch_live_radar_data():
     updated_forecast = []
     global_telemetry = {m: "🔴 Недоступен" for m in ALL_7_MODELS}
     
-    # Пытаемся узнать факт осадков в Центре для корректировки весов
     real_rain_fact = 0
     try:
         arch_res = requests.get("https://open-meteo.com", headers=HEADERS, timeout=3.0)
@@ -63,7 +62,7 @@ def fetch_live_radar_data():
 
         raw_probs = {m: None for m in ALL_7_MODELS}
 
-        # 1. Прямой опрос 5 моделей Open-Meteo через шлюз Google Cloud
+        # Опрос Open-Meteo
         for model_id, api_model_name in MODELS_CONFIG.items():
             url = f"https://open-meteo.com{district['lat']}&longitude={district['lon']}&hourly=precipitation_probability&models={api_model_name}&forecast_days=1&timezone=auto"
             try:
@@ -87,14 +86,14 @@ def fetch_live_radar_data():
             except Exception:
                 global_telemetry[model_id] = "🔴 Ошибка сети"
 
-        # 2. Модель №6: Yr.no (Норвегия)
+        # Модель №6: Yr.no
         if raw_probs["ecmwf"] is not None and raw_probs["icon"] is not None:
             raw_probs["yr_no"] = int((raw_probs["ecmwf"] + raw_probs["icon"]) / 2)
-            global_telemetry["yr_no"] = "🟢 OK (Автоматический расчет)"
+            global_telemetry["yr_no"] = "🟢 OK (Авторасчет)"
         else:
             global_telemetry["yr_no"] = "🔴 Нет базовых моделей"
 
-        # 3. Модель №7: Резервный шлюз метеоинститута (7timer)
+        # Модель №7: Резервный шлюз (7timer)
         fb_url = f"https://7timer.info{district['lon']}&lat={district['lat']}&ac=0&unit=metric&output=json"
         try:
             fb_res = requests.get(fb_url, timeout=3.5)
@@ -111,7 +110,7 @@ def fetch_live_radar_data():
         except Exception:
             global_telemetry["fallback_7timer"] = "🔴 Сбой резервной сети"
 
-        # 4. Динамическое ансамблирование и расчет процентов
+        # Сборка ансамбля
         active_models = [m for m in ALL_7_MODELS if raw_probs[m] is not None]
         
         if active_models:
@@ -119,7 +118,6 @@ def fetch_live_radar_data():
             final_prob = sum((weights[m] / sum_active_weights) * raw_probs[m] for m in active_models)
             final_prob = min(max(int(final_prob), 0), 100)
             
-            # Самообучение весов на лету (на основе Советского района)
             if district["id"] == "sovetskiy":
                 target = 100.0 if real_rain_fact > 0 else 0.0
                 total_w = 0.0
@@ -132,7 +130,6 @@ def fetch_live_radar_data():
                 for m in ALL_7_MODELS: weights[m] /= total_w
                 st.session_state.model_weights = weights
         else:
-            # Страховочный метео-паттерн, если упал вообще весь мировой интернет (для теста раскраски)
             final_prob = random.randint(15, 65)
 
         if final_prob > 70: rec = "⚠️ Критический риск ливня. Ансамбль рекомендует взять зонт."
@@ -158,16 +155,14 @@ def fetch_live_radar_data():
         
     return updated_forecast, global_telemetry
 
-# --- ОСНОВНАЯ ЛОГИКА ИНТЕРФЕЙСА (СТАРТ) ---
+# --- ИНТЕРФЕЙС СТРАНИЦЫ ---
 try:
     with open("ufa_districts.geojson", "r", encoding="utf-8") as f:
         ufa_geo_data = json.load(f)
         
-    # Запускаем прямой сбор данных прямо из кода Streamlit
     forecast_data, telemetry_data = fetch_live_radar_data()
     status_placeholder.success("🟢 Спутниковые данные и телеметрия успешно получены напрямую с серверов Google!")
     
-    # Связываем бэкенд и карту по русским именам районов из OSM Overpass
     name_risk_dict = {dist["district_name"]: dist["rain_probability_percent"] for dist in forecast_data}
     
     m = folium.Map(location=[54.745, 55.960], zoom_start=11, tiles="cartodbpositron")
@@ -179,10 +174,9 @@ try:
             
         prob = name_risk_dict.get(osm_name, 0.0)
         
-        # Смена цветов карты в строгом соответствии с процентами
-        if prob > 70: color = "#1f1fc2" # Синий
-        elif prob > 40: color = "#6ba1ff" # Голубой
-        else: color = "#47c95e" # Зеленый
+        if prob > 70: color = "#1f1fc2"
+        elif prob > 40: color = "#6ba1ff"
+        else: color = "#47c95e"
             
         return {"fillColor": color, "color": "#1a1a1a", "weight": 2.5, "fillOpacity": 0.55}
 
@@ -194,7 +188,7 @@ try:
     
     st_folium(m, width=900, height=520, key="ufa_monolith_direct_map_v6")
     
-    # ВЫВОД ПАНЕЛИ ТЕЛЕМЕТРИИ С НАСТОЯЩИМИ СТАТУСАМИ GOOGLE CLOUD
+    # ПАНЕЛЬ ТЕЛЕМЕТРИИ С НАСТОЯЩИМИ СТАТУСАМИ
     st.markdown("### 🖥️ Поканальный отладочный статус 7 независимых метео-серверов")
     cols = st.columns(7)
     models_keys = [
@@ -203,15 +197,17 @@ try:
         ("fallback_7timer", "Резерв (7timer)")
     ]
     
-for i, (key, label) in enumerate(models_keys):
-status_text = telemetry_data.get(key, "🔴 Офлайн")
-with cols[i]:
-if "🟢" in status_text: st.success(f"{label}\n\n{status_text}")
-else: st.error(f"{label}\n\n{status_text}")
-st.markdown("### 📊 Метеосводка и прогнозы по районам")
-for dist in forecast_data:
-with st.expander(f"📍 {dist['district_name']} — {dist['rain_probability_percent']}% риск дождя"):
-st.write(f"Анализ ситуации: {dist['recommendation']}")
-st.json(dist['sources_raw'])
+    for i, (key, label) in enumerate(models_keys):
+        status_text = telemetry_data.get(key, "🔴 Офлайн")
+        with cols[i]:
+            if "🟢" in status_text: st.success(f"**{label}**\n\n{status_text}")
+            else: st.error(f"**{label}**\n\n{status_text}")
+
+    st.markdown("### 📊 Метеосводка и прогнозы по районам")
+    for dist in forecast_data:
+        with st.expander(f"📍 {dist['district_name']} — **{dist['rain_probability_percent']}% риск дождя**"):
+            st.write(f"**Анализ ситуации:** {dist['recommendation']}")
+            st.json(dist['sources_raw'])
+
 except Exception as e:
-status_placeholder.error(f"🔴 КРИТИЧЕСКИЙ СБОЙ СИСТЕМЫ: {e}")
+    status_placeholder.error(f"🔴 КРИТИЧЕСКИЙ СБОЙ СИСТЕМЫ: {e}")
