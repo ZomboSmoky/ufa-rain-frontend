@@ -9,7 +9,7 @@ st.set_page_config(page_title="Радар Уфы — Мониторинг сис
 st.title("🌧️ Микролокальный погодный радар Уфы")
 st.subheader("Высокоточный анализ рисков осадков с поканальной отладкой источников")
 
-API_URL = "https://onrender.com"
+API_URL = "https://ufa-rain-backend-1.onrender.com/api/v1/forecast"
 status_placeholder = st.info("⏳ Синхронизация со спутниковыми данными и опрос телеметрии моделей...")
 
 try:
