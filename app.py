@@ -2,14 +2,14 @@ import streamlit as st
 import folium
 from streamlit_folium import st_folium
 import json
-import streamlit.components.v1 as components
+from streamlit_javascript import st_javascript
 
 st.set_page_config(page_title="Радар Уфы — Браузерный Ансамбль", layout="wide", page_icon="🌧️")
 
 st.title("🌧️ Микролокальный погодный радар Уфы")
 st.subheader("Автономный обход облачных блокировок через прямое браузерное сканирование (Client-Side Fetching)")
 
-status_placeholder = st.info("⏳ Загрузка метеоданных из кэша системы...")
+status_placeholder = st.info("⏳ Инициализация защищенного моста с вашим браузером...")
 
 # --- БАЗОВЫЕ НАСТРОЙКИ ГОРОДА ---
 OFFICIAL_DISTRICTS = [
@@ -28,10 +28,9 @@ if "model_weights" not in st.session_state:
     st.session_state.model_weights = {m: 1.0 / len(ALL_7_MODELS) for m in ALL_7_MODELS}
 weights = st.session_state.model_weights
 
-# --- ШАГ 1: JAVASCRIPT-ИНЖЕКТОР ДЛЯ ОПРОСА API ИЗ БРАУЗЕРА ПОЛЬЗОВАТЕЛЯ ---
-js_worker_code = f"""
-<script>
-async function getRadarData() {{
+# --- ШАГ 1: АСИНХРОННЫЙ JAVASCRIPT-МОСТ (ВЫПОЛНЯЕТСЯ НА ВАШЕМ ПК) ---
+js_script = f"""
+(async function() {{
     const districts = {json.dumps(OFFICIAL_DISTRICTS)};
     let results = [];
     let telemetry = {{
@@ -41,10 +40,10 @@ async function getRadarData() {{
 
     for (let d of districts) {{
         let raw_probs = {{}};
-        
         let timeStr = null;
+        
         try {{
-            let tRes = await fetch(`https://open-meteo.com{{d.lat}}&longitude=${{d.lon}}&current=time&timezone=auto`);
+            let tRes = await fetch('https://open-meteo.com' + d.lat + '&longitude=' + d.lon + '&current=time&timezone=auto');
             if (tRes.ok) {{
                 let tData = await tRes.json();
                 timeStr = tData?.current?.time;
@@ -58,7 +57,7 @@ async function getRadarData() {{
 
         for (let [mId, apiName] of Object.entries(models)) {{
             try {{
-                let url = `https://open-meteo.com{{d.lat}}&longitude=${{d.lon}}&hourly=precipitation_probability&models=${{apiName}}&forecast_days=1&timezone=auto`;
+                let url = 'https://open-meteo.com' + d.lat + '&longitude=' + d.lon + '&hourly=precipitation_probability&models=' + apiName + '&forecast_days=1&timezone=auto';
                 let res = await fetch(url);
                 if (res.ok) {{
                     let data = await res.json();
@@ -69,7 +68,7 @@ async function getRadarData() {{
                     
                     if (probs.length > 0 && probs[idx] !== undefined) {{
                         raw_probs[mId] = parseInt(probs[idx]);
-                        telemetry[mId] = `🟢 OK (Браузерная сессия)`;
+                        telemetry[mId] = "🟢 OK (Браузерная сессия)";
                     }}
                 }}
             }} catch(e) {{}}
@@ -81,7 +80,7 @@ async function getRadarData() {{
         }}
 
         try {{
-            let fbUrl = `https://7timer.info{{d.lon}}&lat=${{d.lat}}&ac=0&unit=metric&output=json`;
+            let fbUrl = 'https://7timer.info' + d.lon + '&lat=' + d.lat + '&ac=0&unit=metric&output=json';
             let fbRes = await fetch(fbUrl);
             if (fbRes.ok) {{
                 let fbData = await fbRes.json();
@@ -102,37 +101,27 @@ async function getRadarData() {{
         }});
     }}
 
-    parent.postMessage({{
-        type: "streamlit:setComponentValue",
-        value: {{ "forecasts": results, "telemetry": telemetry }}
-    }}, "*");
-}}
-getRadarData();
-</script>
+    return {{ "forecasts": results, "telemetry": telemetry }};
+}})();
 """
 
-# Безопасное монтирование js-скрипта
-receiver = components.html(js_worker_code, height=0, width=0)
+# Запускаем скрипт в браузере и безопасно возвращаем результат напрямую в Python-переменную
+browser_response = st_javascript(js_script)
 
 # --- ШАГ 2: ОБРАБОТКА ДАННЫХ В PYTHON ПОСЛЕ СБОРА БРАУЗЕРОМ ---
 try:
     with open("ufa_districts.geojson", "r", encoding="utf-8") as f:
         ufa_geo_data = json.load(f)
 
-    # Защищенное извлечение данных без использования метода .get() нарушающего синтаксис Streamlit
-    if receiver is None or not hasattr(receiver, "value") or receiver.value is None:
+    # Защита от первоначальной пустоты во время загрузки скрипта
+    if not browser_response or browser_response == 0 or "forecasts" not in browser_response:
         st.warning("⏳ Браузер устанавливает прямое локальное соединение со спутниками... Подождите 3 секунды.")
         st.stop()
 
-    browser_data = receiver.value
-    forecast_raw = browser_data.get("forecasts", [])
-    telemetry_data = browser_data.get("telemetry", {})
+    forecast_raw = browser_response["forecasts"]
+    telemetry_data = browser_response["telemetry"]
 
-    if not forecast_raw:
-        st.warning("🔄 Инициализация сетевых шлюзов. Страница обновится автоматически.")
-        st.stop()
-
-    status_placeholder.success("🟢 Прямой браузерный обход активирован! Данные получены в обход серверов Google/Render.")
+    status_placeholder.success("🟢 Прямой браузерный обход активирован! Данные получены через ваш интернет-канал.")
 
     # Вычисляем финальный математический ансамбль в Python
     forecast_data = []
@@ -191,7 +180,7 @@ try:
         tooltip=folium.GeoJsonTooltip(fields=["name"], aliases=["Район Уфы:"], style="font-family: sans-serif; font-size: 13px;")
     ).add_to(m)
     
-    st_folium(m, width=900, height=520, key="ufa_browser_fetching_map_v10")
+    st_folium(m, width=900, height=520, key="ufa_browser_fetching_map_v11")
     
     # ПАНЕЛЬ ТЕЛЕМЕТРИИ
     st.markdown("### 🖥️ Поканальный отладочный статус 7 независимых метео-серверов")
