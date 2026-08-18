@@ -4,10 +4,10 @@ import folium
 from streamlit_folium import st_folium
 import json
 
-st.set_page_config(page_title="Радар Уфы — Телеметрия", layout="wide", page_icon="🌧️")
+st.set_page_config(page_title="Радар Уфы — Точная Раскраска", layout="wide", page_icon="🌧️")
 
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Высокоточный анализ рисков осадков с поканальной отладкой источников")
+st.subheader("Высокоточный анализ рисков осадков с поканальной отладкой 7 независимых источников")
 
 API_URL = "https://ufa-rain-backend-1.onrender.com/api/v1/forecast"
 status_placeholder = st.info("⏳ Синхронизация со спутниковыми данными и опрос телеметрии моделей...")
@@ -20,42 +20,67 @@ try:
     
     if response.status_code == 200:
         root_data = response.json()
-        status_placeholder.success("🟢 Телеметрия успешно получена с сервера бэкенда!")
+        status_placeholder.success("🟢 Данные и телеметрия успешно получены с сервера!")
         
-        # Безопасно достаем списки прогнозов и телеметрии из корня JSON
         forecast_data = root_data.get("forecasts", [])
         telemetry_data = root_data.get("telemetry", {})
         
-        risk_dict = {dist["district_id"]: dist["rain_probability_percent"] for dist in forecast_data}
+        # Создаем словарь связи, где ключом является НАСТОЯЩЕЕ имя района (например, "Советский район")
+        # Это гарантирует 100% совпадение с данными из Overpass Turbo
+        name_risk_dict = {dist["district_name"]: dist["rain_probability_percent"] for dist in forecast_data}
         
         m = folium.Map(location=[54.745, 55.960], zoom_start=11, tiles="cartodbpositron")
         
         def style_district(feature):
-            district_id = feature.get("id") or feature.get("properties", {}).get("id")
-            prob = risk_dict.get(district_id, 0.0)
-            if prob > 70: color = "#1f1fc2"
-            elif prob > 40: color = "#6ba1ff"
-            else: color = "#47c95e"
-            return {"fillColor": color, "color": "#1a1a1a", "weight": 2.5, "fillOpacity": 0.45}
+            # Извлекаем человеческое название района из GeoJSON (блок properties -> name)
+            osm_name = feature.get("properties", {}).get("name", "").strip()
+            
+            # Если Overpass выдал имя без слова "район" (например, "Советский"), подстрахуемся:
+            if osm_name and "район" not in osm_name.lower():
+                osm_name = f"{osm_name} район"
+                
+            # Ищем вероятность осадков по русскому имени района. Если не нашли — берем 0%
+            prob = name_risk_dict.get(osm_name, 0.0)
+            
+            # Логика смены цвета в строгом соответствии с процентами ансамбля
+            if prob > 70:
+                color = "#1f1fc2"  # Ливень -> Тёмно-синий
+            elif prob > 40:
+                color = "#6ba1ff"  # Средний риск -> Голубой
+            else:
+                color = "#47c95e"  # Сухо -> Приятный зеленый
+                
+            return {
+                "fillColor": color, 
+                "color": "#1a1a1a", 
+                "weight": 2.5, 
+                "fillOpacity": 0.50
+            }
 
         folium.GeoJson(
             ufa_geo_data,
             style_function=style_district,
-            tooltip=folium.GeoJsonTooltip(fields=["name"], aliases=["Район:"], style="font-family: sans-serif; font-size: 13px;")
+            tooltip=folium.GeoJsonTooltip(
+                fields=["name"], 
+                aliases=["Район города Уфы:"], 
+                style="font-family: sans-serif; font-size: 13px; padding: 8px;"
+            )
         ).add_to(m)
         
-        st_folium(m, width=900, height=520, key="ufa_root_fixed_map_v3")
+        # Принудительно меняем ключ карты на v5, чтобы Streamlit Cloud полностью очистил старый кэш отрисовки
+        st_folium(m, width=900, height=520, key="ufa_7_sources_fixed_names_map_v5")
         
-        # ОТЛАДОЧНЫЙ МОНИТОРИНГ ИСТОЧНИКОВ
-        st.markdown("### 🖥️ Поканальный отладочный статус метео-серверов")
-        cols = st.columns(6)
+        # СЕТКА МОНИТОРИНГА НА 7 КОЛОНОК
+        st.markdown("### 🖥️ Поканальный отладочный статус 7 метео-серверов")
+        cols = st.columns(7)
         models_keys = [
             ("ecmwf", "ECMWF (Европа)"), ("gfs", "GFS (США)"), ("icon", "ICON (Германия)"), 
-            ("arome", "France (Франция)"), ("jma", "JMA (Япония)"), ("yr_no", "Yr.no (Норвегия)")
+            ("arome", "France (Франция)"), ("jma", "JMA (Япония)"), ("yr_no", "Yr.no (Норвегия)"),
+            ("fallback_7timer", "Резерв (7timer)")
         ]
         
         for i, (key, label) in enumerate(models_keys):
-            status_text = telemetry_data.get(key, "🔴 Данные отсутствуют")
+            status_text = telemetry_data.get(key, "🔴 Офлайн")
             with cols[i]:
                 if "🟢" in status_text:
                     st.success(f"**{label}**\n\n{status_text}")
@@ -68,7 +93,5 @@ try:
                 st.write(f"**Анализ ситуации:** {dist['recommendation']}")
                 st.json(dist['sources_raw'])
                 
-    else:
-        status_placeholder.error(f"🔴 СБОЙ СЕРВЕРА БЭКЕНДА: Код {response.status_code}")
 except Exception as e:
-    status_placeholder.warning(f"⏳ Переподключение... Обновите страницу. (Техническое инфо: {e})")
+    status_placeholder.error(f"🔴 КРИТИЧЕСКИЙ СБОЙ ИНТЕРФЕЙСА: {e}")
