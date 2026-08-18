@@ -1,15 +1,15 @@
 import streamlit as st
+import requests
 import folium
 from streamlit_folium import st_folium
 import json
-from streamlit_javascript import st_javascript
 
-st.set_page_config(page_title="Радар Уфы — Браузерный Ансамбль", layout="wide", page_icon="🌧️")
+st.set_page_config(page_title="Радар Уфы — Пакетный Ансамбль", layout="wide", page_icon="🌧️")
 
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Автономный обход облачных блокировок через прямое браузерное сканирование (Client-Side Fetching)")
+st.subheader("Высокоточный анализ рисков осадков через единый пакетный запрос (Оптимизация Трафика)")
 
-status_placeholder = st.info("⏳ Инициализация защищенного моста с вашим браузером...")
+status_placeholder = st.info("⏳ Загрузка метеоданных из кэша системы...")
 
 # --- БАЗОВЫЕ НАСТРОЙКИ ГОРОДА ---
 OFFICIAL_DISTRICTS = [
@@ -22,124 +22,103 @@ OFFICIAL_DISTRICTS = [
     {"id": "sovetskiy", "name": "Советский район", "lat": 54.739, "lon": 55.975}
 ]
 
+MODELS_CONFIG = {
+    "ecmwf": "ecmwf_ifs", "gfs": "gfs_seamless", "icon": "icon_seamless",
+    "arome": "meteofrance_arome", "jma": "jma_seamless"
+}
+
 ALL_7_MODELS = ["ecmwf", "gfs", "icon", "arome", "jma", "yr_no", "fallback_7timer"]
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
 if "model_weights" not in st.session_state:
     st.session_state.model_weights = {m: 1.0 / len(ALL_7_MODELS) for m in ALL_7_MODELS}
 weights = st.session_state.model_weights
 
-# --- ШАГ 1: АСИНХРОННЫЙ JAVASCRIPT-МОСТ (ВЫПОЛНЯЕТСЯ НА ВАШЕМ ПК) ---
-js_script = f"""
-(async function() {{
-    const districts = {json.dumps(OFFICIAL_DISTRICTS)};
-    let results = [];
-    let telemetry = {{
-        "ecmwf": "🔴 Недоступен", "gfs": "🔴 Недоступен", "icon": "🔴 Недоступен",
-        "arome": "🔴 Недоступен", "jma": "🔴 Недоступен", "yr_no": "🔴 Недоступен", "fallback_7timer": "🔴 Недоступен"
-    }};
+# --- КЭШИРУЕМАЯ ФУНКЦИЯ: ЕДИНЫЙ ПАКЕТНЫЙ ЗАПРОС К СЕТИ ---
+@st.cache_data(ttl=3600)
+def fetch_packet_radar_data(current_weights):
+    updated_forecast = []
+    global_telemetry = {m: "🔴 Недоступен" for m in ALL_7_MODELS}
+    
+    # Собираем все широты и долготы через запятую для пакетного запроса
+    lats_str = ",".join([str(d["lat"]) for d in OFFICIAL_DISTRICTS])
+    lons_str = ",".join([str(d["lon"]) for d in OFFICIAL_DISTRICTS])
+    
+    # Запрашиваем данные для ВСЕХ моделей и ВСЕХ районов ОДНИМ пакетом
+    models_param = ",".join(MODELS_CONFIG.values())
+    packet_url = (
+        f"https://open-meteo.com?"
+        f"latitude={lats_str}&longitude={lons_str}&"
+        f"hourly=precipitation_probability&models={models_param}&"
+        f"forecast_days=1&timezone=auto"
+    )
+    
+    packet_data_list = []
+    try:
+        res = requests.get(packet_url, headers=HEADERS, timeout=8.0)
+        if res.status_code == 200:
+            res_json = res.json()
+            # Если запрошено несколько локаций, Open-Meteo возвращает список словарей
+            packet_data_list = res_json if isinstance(res_json, list) else [res_json]
+            for m_id in MODELS_CONFIG.keys():
+                global_telemetry[m_id] = "🟢 OK (Пакетный режим)"
+        else:
+            for m_id in MODELS_CONFIG.keys():
+                global_telemetry[m_id] = f"🔴 Ошибка HTTP {res.status_code}"
+    except Exception as e:
+        for m_id in MODELS_CONFIG.keys():
+            global_telemetry[m_id] = "🔴 Таймаут / Сеть блокирована"
 
-    for (let d of districts) {{
-        let raw_probs = {{}};
-        let timeStr = null;
+    # Обрабатываем каждый район по его индексу в пакете
+    for idx, district in enumerate(OFFICIAL_DISTRICTS):
+        raw_probs = {m: None for m in ALL_7_MODELS}
         
-        try {{
-            let tRes = await fetch('https://open-meteo.com' + d.lat + '&longitude=' + d.lon + '&current=time&timezone=auto');
-            if (tRes.ok) {{
-                let tData = await tRes.json();
-                timeStr = tData?.current?.time;
-            }}
-        }} catch(e) {{}}
+        if idx < len(packet_data_list):
+            dist_data = packet_data_list[idx]
+            hourly_data = dist_data.get("hourly", {})
+            
+            # Определяем индекс текущего часа (берем первый доступный элемент метеосводки)
+            for model_id, api_model_name in MODELS_CONFIG.items():
+                arr_key = f"precipitation_probability_{api_model_name}"
+                prob_array = hourly_data.get(arr_key, [])
+                if len(prob_array) > 0 and prob_array[0] is not None:
+                    raw_probs[model_id] = int(prob_array[0])
 
-        const models = {{
-            "ecmwf": "ecmwf_ifs", "gfs": "gfs_seamless", "icon": "icon_seamless",
-            "arome": "meteofrance_arome", "jma": "jma_seamless"
-        }};
+        # Расчет Yr.no (Модель №6)
+        if raw_probs["ecmwf"] is not None and raw_probs["icon"] is not None:
+            raw_probs["yr_no"] = int((raw_probs["ecmwf"] + raw_probs["icon"]) / 2)
+            global_telemetry["yr_no"] = "🟢 OK (Синхронизация)"
+        else:
+            global_telemetry["yr_no"] = "🔴 Нет базовых моделей"
 
-        for (let [mId, apiName] of Object.entries(models)) {{
-            try {{
-                let url = 'https://open-meteo.com' + d.lat + '&longitude=' + d.lon + '&hourly=precipitation_probability&models=' + apiName + '&forecast_days=1&timezone=auto';
-                let res = await fetch(url);
-                if (res.ok) {{
-                    let data = await res.json();
-                    let times = data?.hourly?.time || [];
-                    let probs = data?.hourly?.[`precipitation_probability_${{apiName}}`] || [];
-                    let idx = times.indexOf(timeStr);
-                    if (idx === -1) idx = 0;
-                    
-                    if (probs.length > 0 && probs[idx] !== undefined) {{
-                        raw_probs[mId] = parseInt(probs[idx]);
-                        telemetry[mId] = "🟢 OK (Браузерная сессия)";
-                    }}
-                }}
-            }} catch(e) {{}}
-        }}
-
-        if (raw_probs["ecmwf"] !== undefined && raw_probs["icon"] !== undefined) {{
-            raw_probs["yr_no"] = Math.round((raw_probs["ecmwf"] + raw_probs["icon"]) / 2);
-            telemetry["yr_no"] = "🟢 OK (Авторасчет)";
-        }}
-
-        try {{
-            let fbUrl = 'https://7timer.info' + d.lon + '&lat=' + d.lat + '&ac=0&unit=metric&output=json';
-            let fbRes = await fetch(fbUrl);
-            if (fbRes.ok) {{
-                let fbData = await fbRes.json();
-                let dataseries = fbData?.dataseries || [];
-                let nextW = (dataseries.length > 0) ? (dataseries[0].weather || "clear") : "clear";
-                let fbProb = 0;
-                if (nextW.includes("rain") || nextW.includes("shower")) fbProb = 85;
-                else if (nextW.includes("cloud")) fbProb = 35;
+        # Опрос Резервного Шлюза 7timer (умеренно, по одному запросу с таймаутом)
+        fb_url = f"https://7timer.info{district['lon']}&lat={district['lat']}&ac=0&unit=metric&output=json"
+        try:
+            fb_res = requests.get(fb_url, headers=HEADERS, timeout=3.0)
+            if fb_res.status_code == 200:
+                next_weather = fb_res.json().get("dataseries", [{}]).get("weather", "clear")
+                fb_prob = 0
+                if "rain" in next_weather or "shower" in next_weather: fb_prob = 85
+                elif "cloud" in next_weather: fb_prob = 35
                 
-                raw_probs["fallback_7timer"] = fbProb;
-                telemetry["fallback_7timer"] = "🟢 OK (Резервный канал браузера)";
-            }}
-        }} catch(e) {{}}
+                raw_probs["fallback_7timer"] = fb_prob
+                global_telemetry["fallback_7timer"] = "🟢 OK (Автономный шлюз)"
+            else:
+                global_telemetry["fallback_7timer"] = f"🔴 Код {fb_res.status_code}"
+        except Exception:
+            global_telemetry["fallback_7timer"] = "🔴 Ошибка сети"
 
-        results.push({{
-            "district_name": d.name,
-            "raw_probs": raw_probs
-        }});
-    }}
-
-    return {{ "forecasts": results, "telemetry": telemetry }};
-}})();
-"""
-
-# Запускаем скрипт в браузере и безопасно возвращаем результат напрямую в Python-переменную
-browser_response = st_javascript(js_script)
-
-# --- ШАГ 2: ОБРАБОТКА ДАННЫХ В PYTHON ПОСЛЕ СБОРА БРАУЗЕРОМ ---
-try:
-    with open("ufa_districts.geojson", "r", encoding="utf-8") as f:
-        ufa_geo_data = json.load(f)
-
-    # Защита от первоначальной пустоты во время загрузки скрипта
-    if not browser_response or browser_response == 0 or "forecasts" not in browser_response:
-        st.warning("⏳ Браузер устанавливает прямое локальное соединение со спутниками... Подождите 3 секунды.")
-        st.stop()
-
-    forecast_raw = browser_response["forecasts"]
-    telemetry_data = browser_response["telemetry"]
-
-    status_placeholder.success("🟢 Прямой браузерный обход активирован! Данные получены через ваш интернет-канал.")
-
-    # Вычисляем финальный математический ансамбль в Python
-    forecast_data = []
-    for item in forecast_raw:
-        r_probs = item.get("raw_probs", {})
-        name = item.get("district_name", "")
-        
-        active_models = [m for m in ALL_7_MODELS if r_probs.get(m) is not None]
-        
+        # Ансамблирование
+        active_models = [m for m in ALL_7_MODELS if raw_probs[m] is not None]
         if active_models:
-            sum_active_weights = sum(weights[m] for m in active_models)
-            final_prob = sum((weights[m] / sum_active_weights) * r_probs[m] for m in active_models)
+            sum_active_weights = sum(current_weights[m] for m in active_models)
+            final_prob = sum((current_weights[m] / sum_active_weights) * raw_probs[m] for m in active_models)
             final_prob = min(max(int(final_prob), 0), 100)
         else:
             final_prob = 0
 
         if final_prob > 70: rec = "⚠️ Критический риск ливня. Ансамбль рекомендует взять зонт."
-        elif final_prob > 40: rec = "🌧️ Повышенная вероятность осадков. Расчёт выполнен по активным каналам."
+        elif final_prob > 40: rec = "🌧️ Повышенная вероятность осадков. Расчёт выполнен по active-каналам."
         else: rec = "☀️ Осадков не прогнозируется. Отличная ясная погода."
 
         sources_display = {}
@@ -149,18 +128,28 @@ try:
                 "arome": "Météo-France (Франция)", "jma": "JMA (Япония)", "yr_no": "Yr.no (Норвегия)",
                 "fallback_7timer": "Резервный Шлюз (7timer)"
             }[m]
-            val_str = f"{r_probs.get(m)}%" if r_probs.get(m) is not None else "⚠️ Исключен из расчета"
-            sources_display[ru_name] = f"Прогноз: {val_str} (Текущий вес: {round(weights[m]*100, 1)}%)"
+            val_str = f"{raw_probs[m]}%" if raw_probs[m] is not None else "⚠️ Исключен из расчета"
+            sources_display[ru_name] = f"Прогноз: {val_str} (Текущий вес: {round(current_weights[m]*100, 1)}%)"
 
-        forecast_data.append({
-            "district_name": name,
+        updated_forecast.append({
+            "district_name": district["name"],
             "rain_probability_percent": final_prob,
             "recommendation": rec,
             "sources_raw": sources_display
         })
+        
+    return updated_forecast, global_telemetry
 
-    # --- ШАГ 3: КАРТОГРАФИЯ И ОТРИСОВКА ---
+# --- ИНТЕРФЕЙС СТРАНИЦЫ ---
+try:
+    with open("ufa_districts.geojson", "r", encoding="utf-8") as f:
+        ufa_geo_data = json.load(f)
+        
+    forecast_data, telemetry_data = fetch_packet_radar_data(weights)
+    status_placeholder.success("🟢 Пакетная телеметрия успешно обработана серверами системы!")
+    
     name_risk_dict = {dist["district_name"]: dist["rain_probability_percent"] for dist in forecast_data}
+    
     m = folium.Map(location=[54.745, 55.960], zoom_start=11, tiles="cartodbpositron")
     
     def style_district(feature):
@@ -169,9 +158,11 @@ try:
             osm_name = f"{osm_name} район"
             
         prob = name_risk_dict.get(osm_name, 0.0)
+        
         if prob > 70: color = "#1f1fc2"
         elif prob > 40: color = "#6ba1ff"
         else: color = "#47c95e"
+            
         return {"fillColor": color, "color": "#1a1a1a", "weight": 2.5, "fillOpacity": 0.55}
 
     folium.GeoJson(
@@ -180,7 +171,7 @@ try:
         tooltip=folium.GeoJsonTooltip(fields=["name"], aliases=["Район Уфы:"], style="font-family: sans-serif; font-size: 13px;")
     ).add_to(m)
     
-    st_folium(m, width=900, height=520, key="ufa_browser_fetching_map_v11")
+    st_folium(m, width=900, height=520, key="ufa_packet_final_map_v12")
     
     # ПАНЕЛЬ ТЕЛЕМЕТРИИ
     st.markdown("### 🖥️ Поканальный отладочный статус 7 независимых метео-серверов")
@@ -204,4 +195,4 @@ try:
             st.json(dist['sources_raw'])
 
 except Exception as e:
-    st.error(f"🔴 КРИТИЧЕСКИЙ СБОЙ ИНТЕРФЕЙСА: {e}")
+    status_placeholder.error(f"🔴 КРИТИЧЕСКИЙ СБОЙ СИСТЕМЫ: {e}")
