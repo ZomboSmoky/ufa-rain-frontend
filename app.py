@@ -1,5 +1,6 @@
 import streamlit as st
 import requests, folium, json
+from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
@@ -86,7 +87,6 @@ def fetch_radar_data(weights):
         probs["imd_india"] = min(max(probs["fallback_7timer"] + 2, 0), 100)
         audit["cma_china"], audit["imd_india"] = 24, 24
         
-        # Присваиваем им статус полноценных источников, если базовая сетка 7timer жива
         is_authentic["cma_china"] = is_authentic["fallback_7timer"]
         is_authentic["imd_india"] = is_authentic["fallback_7timer"]
         display_statuses["cma_china"] = "🟢 ОРИГИНАЛ" if is_authentic["cma_china"] else "🔴 БЛОКИРОВКА (0% веса)"
@@ -96,7 +96,6 @@ def fetch_radar_data(weights):
         act = [m for m in ALL_9 if probs[m] is not None and is_authentic[m]]
         
         if not act:
-            # Предохранитель на случай если упал вообще весь мировой интернет
             for m in ALL_9: display_weights[m] = 0.0
             final_p = 25
             src_disp = {m: f"Прогноз: {probs[m]}% | Вес: 0.0% (Тотальный сбой сетей)" for m in ALL_9}
@@ -142,7 +141,7 @@ try:
     
     st_folium(m, width=900, height=520, key="ufa_map_v27")
     
-    st.markdown("### 🖥 *Текущий статус оригинальности метео-серверов*")
+    st.markdown("### 🖥️ Текущий статус оригинальности метео-серверов")
     cols = st.columns(9)
     labels = [
         ("ecmwf", "ECMWF"), ("gfs", "GFS"), ("icon", "ICON"), 
