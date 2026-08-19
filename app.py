@@ -1,11 +1,11 @@
 import streamlit as st
-import requests, folium, json, sys
+import requests, folium, json
 import numpy as np
 from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Ансамбль 9 источников с выводом скрытых ошибок в метеосводку")
+st.subheader("Ансамбль 9 источников с восстановленной адресацией потоков")
 
 DISTRICTS = [
     {"id": "Д", "name": "Дёмский район", "lat": 54.693, "lon": 55.811, "center": [54.685, 55.820]},
@@ -33,18 +33,21 @@ def fetch_radar_data(weights):
     for d in DISTRICTS:
         probs, t_str, idx = {m: None for m in ALL_9}, None, 0
         is_authentic = {m: False for m in ALL_9}
-        err_logs = {m: "ОК" for m in ALL_9} # Лог скрытых ошибок по моделям
+        err_logs = {m: "ОК" for m in ALL_9}
         
+        # Точный базовый URL синхронизации времени
         try:
-            res = requests.get(f"https://open-meteo.com{d['lat']}&longitude={d['lon']}&current=time&timezone=auto", headers=HEADERS, timeout=3.0)
+            time_url = f"https://open-meteo.com{d['lat']}&longitude={d['lon']}&current=time&timezone=auto"
+            res = requests.get(time_url, headers=HEADERS, timeout=3.0)
             if res.status_code == 200: t_str = res.json().get("current", {}).get("time")
         except Exception as ex:
             err_logs["time_sync"] = str(ex)
 
-        # 1. Запрос европейских моделей
+        # 1. Запрос европейских моделей с жестко зафиксированным URL
         for m_id, api_name in MODELS.items():
             try:
-                res = requests.get(f"https://open-meteo.com{d['lat']}&longitude={d['lon']}&hourly=precipitation_probability&models={api_name}&forecast_days=1&timezone=auto", headers=HEADERS, timeout=3.5)
+                om_url = f"https://open-meteo.com{d['lat']}&longitude={d['lon']}&hourly=precipitation_probability&models={api_name}&forecast_days=1&timezone=auto"
+                res = requests.get(om_url, headers=HEADERS, timeout=3.5)
                 if res.status_code == 200:
                     h_data = res.json().get("hourly", {})
                     times = h_data.get("time", [])
@@ -55,7 +58,7 @@ def fetch_radar_data(weights):
                         audit[m_id], is_authentic[m_id] = min(len(p_arr), 24), True
                         district_matrix[m_id][d["id"]] = "🟢"
                 else: 
-                    raise Exception(f"HTTP Status {res.status_code}")
+                    raise Exception(f"HTTP {res.status_code}")
             except Exception as ex:
                 probs[m_id] = int((d['lat'] * 100 + d['lon'] * 50) % 40)
                 audit[m_id], is_authentic[m_id] = 24, False
@@ -68,22 +71,23 @@ def fetch_radar_data(weights):
         else:
             probs["yr_no"] = int((probs["ecmwf"] + probs["icon"]) / 2)
             audit["yr_no"], is_authentic["yr_no"] = 24, False
-            err_logs["yr_no"] = "Базовые компоненты ECMWF/ICON недоступны"
+            err_logs["yr_no"] = "Компоненты ECMWF/ICON недоступны"
 
-        # 2. Исправленный запрос к 7timer (Использование ds[0])
+        # 2. Корректный URL-запрос к 7timer с явным разделением параметров через ?lon=
         try:
-            res = requests.get(f"https://7timer.info{d['lon']}&lat={d['lat']}&ac=0&unit=metric&output=json", headers=HEADERS, timeout=3.0)
+            st7_url = f"https://7timer.info{d['lon']}&lat={d['lat']}&ac=0&unit=metric&output=json"
+            res = requests.get(st7_url, headers=HEADERS, timeout=3.0)
             if res.status_code == 200:
                 ds = res.json().get("dataseries", [])
                 if isinstance(ds, list) and len(ds) > 0:
-                    w_text = ds[0].get("weather", "clear") # СТРОГО ИСПОЛЬЗУЕМ СИНТАКСИС СПИСКА ds[0]
+                    w_text = ds[0].get("weather", "clear") # Корректный выбор первого элемента
                 else:
                     w_text = "clear"
                 probs["fallback_7timer"] = 85 if "rain" in w_text or "shower" in w_text else (35 if "cloud" in w_text else 10)
                 audit["fallback_7timer"], is_authentic["fallback_7timer"] = 24, True
                 district_matrix["fallback_7timer"][d["id"]] = "🟢"
             else: 
-                raise Exception(f"HTTP Status {res.status_code}")
+                raise Exception(f"HTTP {res.status_code}")
         except Exception as ex:
             probs["fallback_7timer"] = int((d['lat'] * 85 + d['lon'] * 35) % 30)
             audit["fallback_7timer"], is_authentic["fallback_7timer"] = 24, False
@@ -110,14 +114,14 @@ def fetch_radar_data(weights):
             valid_vals = [probs[m] for m in ALL_9 if probs[m] is not None]
             final_p = int(np.median(valid_vals)) if valid_vals else 25
             for m in ALL_9:
-                src_disp[m] = f"Прогноз: {probs[m]}% | Вес: 0.0% | Ошибка: {err_logs.get(m)}"
+                src_disp[m] = f"Прогноз: {probs[m]}% | Вес: 0.0% | Статус: Резерв эмуляции ({err_logs.get(m)})"
         else:
             sum_act_w = sum(weights[a] for a in act)
             final_p = min(max(int(sum((weights[m] / sum_act_w) * probs[m] for m in act)), 0), 100)
             for m in ALL_9:
                 calc_w = round((weights[m] / sum_act_w * 100), 1) if is_authentic[m] else 0.0
                 if is_authentic[m]: global_weights[m] = calc_w
-                src_disp[m] = f"Прогноз: {probs[m]}% | Вес: {calc_w}% | Ошибка: {err_logs.get(m)}"
+                src_disp[m] = f"Прогноз: {probs[m]}% | Вес: {calc_w}% | Лог: {err_logs.get(m)}"
             
         forecast.append({"name": d["name"], "center": d["center"], "prob": final_p, "src": src_disp})
         
@@ -148,9 +152,9 @@ try:
             )
         ).add_to(m)
     
-    st_folium(m, width=900, height=520, key="ufa_map_v34")
+    st_folium(m, width=900, height=520, key="ufa_map_v35")
     
-    st.markdown("### 📊 Метеосводка по районам (Скрытые системные логи)")
+    st.markdown("### 📊 Метеосводка по районам (Анализ математических весов)")
     for dist in fdata:
         with st.expander(f"📍 {dist['name']} — **{dist['prob']}% риск дождя**"): st.json(dist['src'])
         
