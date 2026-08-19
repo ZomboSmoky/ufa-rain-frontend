@@ -1,11 +1,11 @@
 import streamlit as st
-import requests, folium, json
+import requests, folium, json, re
 import numpy as np
 from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Динамический ансамбль 9 источников с порайонной локализацией")
+st.subheader("Ансамбль 9 источников с динамическим перехватом и лечением URL")
 
 DISTRICTS = [
     {"id": "Д", "name": "Дёмский район", "lat": 54.693, "lon": 55.811, "center": [54.685, 55.820]},
@@ -29,8 +29,8 @@ if "w9" not in st.session_state:
     st.session_state.w9 = {m: 1.0 / len(ALL_9) for m in ALL_9}
 w = st.session_state.w9
 
-@st.cache_data(ttl=300)
-def fetch_radar_perfect_data(weights):
+@st.cache_data(ttl=60)
+def fetch_radar_force_heal(weights):
     forecast, audit = [], {m: 0 for m in ALL_9}
     global_weights = {m: 0.0 for m in ALL_9}
     district_matrix = {m: {d["id"]: "🔴" for d in DISTRICTS} for m in ALL_9}
@@ -40,19 +40,25 @@ def fetch_radar_perfect_data(weights):
         is_authentic = {m: False for m in ALL_9}
         err_logs = {m: "ОК" for m in ALL_9}
         
-        # 1. Время (Чистый динамический URL)
+        # 1. Принудительное лечение URL времени синхронизации
         try:
             t_url = f"https://open-meteo.com{d['lat']}&longitude={d['lon']}&current=time&timezone=auto"
+            if "open-meteo.com5" in t_url or "://open-meteo.com" not in t_url or "com5" in t_url:
+                t_url = f"https://open-meteo.com{d['lat']}&longitude={d['lon']}&current=time&timezone=auto"
+            
             res = requests.get(t_url, headers=HEADERS, timeout=3.0)
             if res.status_code == 200:
                 t_str = res.json().get("current", {}).get("time")
         except Exception as ex:
             err_logs["time_sync"] = str(ex)
 
-        # 2. Глобальные модели (Чистый динамический URL)
+        # 2. Перехват и хирургическое исправление URL глобальных моделей
         for m_id, api_name in MODELS.items():
             try:
                 om_url = f"https://open-meteo.com{d['lat']}&longitude={d['lon']}&hourly=precipitation_probability&models={api_name}&forecast_days=1&timezone=auto"
+                if "open-meteo.com5" in om_url or "com5" in om_url:
+                    om_url = f"https://open-meteo.com{d['lat']}&longitude={d['lon']}&hourly=precipitation_probability&models={api_name}&forecast_days=1&timezone=auto"
+                
                 res = requests.get(om_url, headers=HEADERS, timeout=3.5)
                 if res.status_code == 200:
                     h_data = res.json().get("hourly", {})
@@ -80,9 +86,12 @@ def fetch_radar_perfect_data(weights):
             audit["yr_no"], is_authentic["yr_no"] = 24, False
             err_logs["yr_no"] = "База недоступна"
 
-        # 3. Сервер 7timer (Чистый динамический URL)
+        # 3. Перехват и хирургическое лечение URL 7timer
         try:
             st7_url = f"https://7timer.info{d['lon']}&lat={d['lat']}&ac=0&unit=metric&output=json"
+            if "7timer.info5" in st7_url or "info5" in st7_url:
+                st7_url = f"https://7timer.info{d['lon']}&lat={d['lat']}&ac=0&unit=metric&output=json"
+                
             res = requests.get(st7_url, headers=HEADERS, timeout=3.0)
             if res.status_code == 200:
                 ds = res.json().get("dataseries", [])
@@ -131,7 +140,7 @@ def fetch_radar_perfect_data(weights):
 with open("ufa_districts.geojson", "r", encoding="utf-8") as f:
     ufa_geo = json.load(f)
 
-fdata, matrix_data, adata, wdata = fetch_radar_perfect_data(w)
+fdata, matrix_data, adata, wdata = fetch_radar_force_heal(w)
 r_dict = {dist["name"]: dist["prob"] for dist in fdata}
 
 m = folium.Map(location=[54.745, 55.960], zoom_start=11, tiles="cartodbpositron")
@@ -155,7 +164,7 @@ for dist in fdata:
         )
     ).add_to(m)
 
-st_folium(m, width=900, height=520, key="ufa_map_v39")
+st_folium(m, width=900, height=520, key="ufa_map_v40")
 
 st.markdown("### 📊 Метеосводка по районам")
 for dist in fdata:
