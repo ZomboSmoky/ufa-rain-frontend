@@ -5,9 +5,10 @@ from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Модульная архитектура: Безопасное кодирование параметров через CORS-Proxy")
+st.subheader("Раздельная архитектура: 8 моделей на Open-Meteo + изолированный 7timer через CORS-Proxy")
 
-DISTRICTS = [
+# Координатная сетка районов Уфы
+DISTRICT_COORDS = [
     {"id": "Д", "name": "Дёмский район", "lat": 54.693, "lon": 55.811, "center": [54.685, 55.820]},
     {"id": "Кл", "name": "Калининский район", "lat": 54.831, "lon": 56.126, "center": [54.810, 56.120]},
     {"id": "Кр", "name": "Кировский район", "lat": 54.701, "lon": 55.992, "center": [54.670, 56.030]},
@@ -17,93 +18,59 @@ DISTRICTS = [
     {"id": "С", "name": "Советский район", "lat": 54.739, "lon": 55.975, "center": [54.738, 55.980]}
 ]
 
+OM_MAPPING = {
+    "ecmwf": "ecmwf_ifs", "gfs": "gfs_seamless", "icon": "icon_seamless",
+    "arome": "meteofrance_arome", "jma": "jma_seamless", "yr_no": "yr_yr",
+    "cma_china": "cma_graphes", "imd_india": "imd_gfs"
+}
 ALL_9 = ["ecmwf", "gfs", "icon", "arome", "jma", "yr_no", "cma_china", "imd_india", "fallback_7timer"]
 BASE_WEIGHTS = {m: 1.0 / len(ALL_9) for m in ALL_9}
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+PROXY_PREFIX = "https://allorigins.win"
 
-# --- ЕДИНЫЙ БЕЗОПАСНЫЙ СЕТЕВОЙ ШЛЮЗ С АВТОМАТИЧЕСКИМ КОДИРОВАНИЕМ URL ---
+# --- ПРОГРАММНЫЙ ГЕНЕРАТОР СТАТИЧЕСКИХ URL-АДРЕСОВ ПРИ СТАРТЕ ---
+DISTRICTS = []
+for d in DISTRICT_COORDS:
+    urls_pool = {}
+    
+    # 1. Сборка ссылок для 8 моделей Open-Meteo (включая Китай CMA и Индию IMD)
+    for m_id, sys_name in OM_MAPPING.items():
+        urls_pool[m_id] = f"https://open-meteo.com{d['lat']}&longitude={d['lon']}&hourly=precipitation_probability&models={sys_name}&forecast_days=1&timezone=auto"
+    
+    # 2. Сборка ссылки строго на родной сервер 7timer без смешивания с Open-Meteo
+    urls_pool["fallback_7timer"] = f"https://7timer.info{d['lon']}&lat={d['lat']}&ac={random.randint(1,99)}&unit=metric&output=json"
+    
+    DISTRICTS.append({
+        "id": d["id"], "name": d["name"], "center": d["center"], "urls": urls_pool
+    })
 
-def fetch_via_allorigins(target_base_url, target_params):
-    """
-    Отправляет запрос через AllOrigins. 
-    Параметры кодируются библиотекой requests автоматически, предотвращая баги парсеров.
-    """
+# --- ИЗОЛИРОВАННЫЙ СЕТЕВОЙ КОНТУР ---
+def execute_isolated_request(raw_target_url, is_open_meteo=True, model_key=None):
     try:
-        # Позволяем requests корректно собрать чистую строку параметров
-        prepared_req = requests.Request('GET', target_base_url, params=target_params).prepare()
-        final_target_url = prepared_req.url
-        
-        # Передаем полностью экранированный целевой URL прокси-серверу
-        proxy_url = "https://allorigins.win"
-        res = requests.get(proxy_url, params={"url": final_target_url}, headers=HEADERS, timeout=6.0)
+        time.sleep(0.04) # Защитный интервал от DDOS-триггеров
+        proxied_url = f"{PROXY_PREFIX}{requests.utils.quote(raw_target_url)}"
+        res = requests.get(proxied_url, headers=HEADERS, timeout=6.5)
         
         if res.status_code == 200 and res.text.strip() and not res.text.startswith("<"):
-            return res.text
+            cleaned_text = res.text.strip().lstrip('\ufeff')
+            js = json.loads(cleaned_text)
+            
+            if is_open_meteo and model_key:
+                sys_model_name = OM_MAPPING.get(model_key)
+                p_arr = js.get("hourly", {}).get(f"precipitation_probability_{sys_model_name}", [])
+                if p_arr and len(p_arr) > 0:
+                    return int(p_arr[0]), "🟢 Достоверно (Фикс Сети)"
+            else:
+                # Извлекаем данные из оригинального ответа 7timer
+                ds = js.get("dataseries", [])
+                w_text = ds[0].get("weather", "clear") if (isinstance(ds, list) and len(ds) > 0) else "clear"
+                prob = 85 if "rain" in w_text or "shower" in w_text else (40 if "cloud" in w_text else 10)
+                return prob, "🟢 Достоверно (Фикс Сети)"
     except:
         pass
-    return None
+    return 0, "🔴 Недостоверно (Блокировка хостинга)"
 
-# --- ИЗОЛИРОВАННЫЕ КОНТУРЫ МОДЕЛЕЙ ---
-
-def get_europe_model(model_name, lat, lon):
-    try:
-        time.sleep(0.02)
-        p = {
-            "latitude": float(lat), "longitude": float(lon),
-            "hourly": "precipitation_probability", "models": model_name,
-            "forecast_days": 1, "timezone": "auto"
-        }
-        raw_data = fetch_via_allorigins("https://open-meteo.com", p)
-        if raw_data:
-            js = json.loads(raw_data)
-            p_arr = js.get("hourly", {}).get(f"precipitation_probability_{model_name}", [])
-            if p_arr and len(p_arr) > 0:
-                return int(p_arr[0]), "🟢 Достоверно (Прокси)"
-    except Exception as e:
-        return 0, f"🔴 Недостоверно ({str(e)})"
-    return 0, "🔴 Недостоверно (Бан шлюза AllOrigins)"
-
-def get_asian_archive_model(model_name, lat, lon):
-    try:
-        time.sleep(0.02)
-        p = {
-            "latitude": float(lat), "longitude": float(lon),
-            "hourly": "precipitation", "models": model_name,
-            "start_date": "2026-08-18", "end_date": "2026-08-18"
-        }
-        raw_data = fetch_via_allorigins("https://open-meteo.com", p)
-        if raw_data:
-            js = json.loads(raw_data)
-            p_arr = js.get("hourly", {}).get(f"precipitation_{model_name}", [])
-            if p_arr and len(p_arr) > 0:
-                prob = min(int(float(p_arr[-1]) * 100), 95) if float(p_arr[-1]) > 0 else 10
-                return prob, "🟢 Достоверно (Прокси Архив)"
-    except Exception as e:
-        return 0, f"🔴 Недостоверно ({str(e)})"
-    return 0, "🔴 Недостоверно (Бан шлюза Архива)"
-
-def get_7timer_isolated(lat, lon):
-    try:
-        time.sleep(0.03)
-        p = {
-            "lon": float(lon), "lat": float(lat),
-            "ac": random.randint(1, 99), "unit": "metric", "output": "json"
-        }
-        raw_data = fetch_via_allorigins("https://7timer.info", p)
-        if raw_data:
-            cleaned = raw_data.strip().lstrip('\ufeff')
-            js = json.loads(cleaned)
-            ds = js.get("dataseries", [])
-            w_text = ds[0].get("weather", "clear") if (isinstance(ds, list) and len(ds) > 0) else "clear"
-            prob = 85 if "rain" in w_text or "shower" in w_text else (40 if "cloud" in w_text else 10)
-            return prob, "🟢 Достоверно (Прокси 7timer)"
-    except Exception as e:
-        return 0, f"🔴 Недостоверно ({str(e)})"
-    return 0, "🔴 Недостоверно (Бан шлюза 7timer)"
-
-# --- АНСАНБЛЕВЫЙ ДВИЖОК РАДОРА ---
-
-def fetch_isolated_radar_data():
+def fetch_static_radar_data():
     forecast = []
     district_matrix = {m: {d["id"]: "🔴" for d in DISTRICTS} for m in ALL_9}
     global_weights = {m: 0.0 for m in ALL_9}
@@ -113,28 +80,17 @@ def fetch_isolated_radar_data():
         statuses = {m: "🔴 Недостоверно" for m in ALL_9}
         is_alive = {m: False for m in ALL_9}
         
-        euro_map = {"ecmwf": "ecmwf_ifs", "gfs": "gfs_seamless", "icon": "icon_seamless", "arome": "meteofrance_arome", "jma": "jma_seamless"}
-        for m_id, sys_name in euro_map.items():
-            val, msg = get_europe_model(sys_name, d["lat"], d["lon"])
-            probs[m_id], statuses[m_id] = val, msg
-            if "🟢" in msg:
-                is_alive[m_id] = True
-                district_matrix[m_id][d["id"]] = "🟢"
-                
-        asia_map = {"cma_china": "cma_graphes", "imd_india": "imd_gfs", "yr_no": "yr_yr"}
-        for m_id, sys_name in asia_map.items():
-            val, msg = get_asian_archive_model(sys_name, d["lat"], d["lon"])
+        # Поочередный опрос каждого источника в изоляции
+        for m_id in ALL_9:
+            target_url = d["urls"][m_id]
+            is_om = (m_id != "fallback_7timer")
+            val, msg = execute_isolated_request(target_url, is_open_meteo=is_om, model_key=m_id)
             probs[m_id], statuses[m_id] = val, msg
             if "🟢" in msg:
                 is_alive[m_id] = True
                 district_matrix[m_id][d["id"]] = "🟢"
 
-        val_7t, msg_7t = get_7timer_isolated(d["lat"], d["lon"])
-        probs["fallback_7timer"], statuses["fallback_7timer"] = val_7t, msg_7t
-        if "🟢" in msg_7t:
-            is_alive["fallback_7timer"] = True
-            district_matrix["fallback_7timer"][d["id"]] = "🟢"
-
+        # --- ДИНАМИЧЕСКИЙ ПЕРЕСЧЕТ ВЕСОВ АНСАМБЛЯ ДЛЯ РАЙОНА ---
         live_models = [m for m in ALL_9 if is_alive[m]]
         src_disp = {}
         
@@ -144,7 +100,6 @@ def fetch_isolated_radar_data():
         else:
             sum_base_w = sum(BASE_WEIGHTS[m] for m in live_models)
             final_p = min(max(int(sum((BASE_WEIGHTS[m] / sum_base_w) * probs[m] for m in live_models)), 0), 100)
-            
             for m in ALL_9:
                 if is_alive[m]:
                     calc_w = round((BASE_WEIGHTS[m] / sum_base_w * 100), 1)
@@ -154,15 +109,13 @@ def fetch_isolated_radar_data():
                     src_disp[m] = f"Прогноз: 0% | Вес: 0.0% | Состояние: {statuses[m]}"
                     
         forecast.append({"name": d["name"], "center": d["center"], "prob": final_p, "src": src_disp})
-        
     return forecast, district_matrix, global_weights
 
-# --- РЕНДЕРИНГ ИНТЕРФЕЙСА ---
-
+# --- РЕНДЕРИНГ ИНТЕРФЕЙСА STREAMLIT И FOLIUM ---
 with open("ufa_districts.geojson", "r", encoding="utf-8") as f:
     ufa_geo = json.load(f)
 
-fdata, matrix_data, wdata = fetch_isolated_radar_data()
+fdata, matrix_data, wdata = fetch_static_radar_data()
 r_dict = {dist["name"]: dist["prob"] for dist in fdata}
 
 m = folium.Map(location=[54.745, 55.960], zoom_start=11, tiles="cartodbpositron")
@@ -185,7 +138,7 @@ for dist in fdata:
         )
     ).add_to(m)
 
-st_folium(m, width=900, height=520, key="ufa_map_v60")
+st_folium(m, width=900, height=520, key="ufa_map_v63")
 
 st.markdown("### 📊 Метеосводка по районам")
 for dist in fdata:
