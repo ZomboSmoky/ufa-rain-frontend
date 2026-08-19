@@ -3,8 +3,9 @@ import requests, folium, json
 import numpy as np
 from streamlit_folium import st_folium
 
-st.set_page_config(page_title="Радар", layout="wide")
+st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
+st.subheader("Динамический ансамбль 9 источников с порайонной локализацией")
 
 DISTRICTS = [
     {"id": "Д", "name": "Дёмский район", "lat": 54.693, "lon": 55.811, "center": [54.685, 55.820]},
@@ -28,9 +29,8 @@ if "w9" not in st.session_state:
     st.session_state.w9 = {m: 1.0 / len(ALL_9) for m in ALL_9}
 w = st.session_state.w9
 
-# Полный сброс кэша за счёт нового уникального имени функции
-@st.cache_data(ttl=60)
-def execute_hard_radar_fix(weights):
+@st.cache_data(ttl=300)
+def fetch_radar_perfect_data(weights):
     forecast, audit = [], {m: 0 for m in ALL_9}
     global_weights = {m: 0.0 for m in ALL_9}
     district_matrix = {m: {d["id"]: "🔴" for d in DISTRICTS} for m in ALL_9}
@@ -40,24 +40,19 @@ def execute_hard_radar_fix(weights):
         is_authentic = {m: False for m in ALL_9}
         err_logs = {m: "ОК" for m in ALL_9}
         
-        # 1. Принудительное выравнивание URL времени
+        # 1. Время (Чистый динамический URL)
         try:
             t_url = f"https://open-meteo.com{d['lat']}&longitude={d['lon']}&current=time&timezone=auto"
-            if "com5" in t_url:
-                t_url = t_url.replace("com5", "com/v1/forecast?latitude=5")
             res = requests.get(t_url, headers=HEADERS, timeout=3.0)
             if res.status_code == 200:
                 t_str = res.json().get("current", {}).get("time")
         except Exception as ex:
             err_logs["time_sync"] = str(ex)
 
-        # 2. Перехват и хирургическое лечение URL европейских моделей
+        # 2. Глобальные модели (Чистый динамический URL)
         for m_id, api_name in MODELS.items():
             try:
                 om_url = f"https://open-meteo.com{d['lat']}&longitude={d['lon']}&hourly=precipitation_probability&models={api_name}&forecast_days=1&timezone=auto"
-                if "com5" in om_url:
-                    om_url = om_url.replace("com5", "com/v1/forecast?latitude=5")
-                
                 res = requests.get(om_url, headers=HEADERS, timeout=3.5)
                 if res.status_code == 200:
                     h_data = res.json().get("hourly", {})
@@ -85,16 +80,16 @@ def execute_hard_radar_fix(weights):
             audit["yr_no"], is_authentic["yr_no"] = 24, False
             err_logs["yr_no"] = "База недоступна"
 
-        # 3. Перехват и хирургическое лечение URL 7timer
+        # 3. Сервер 7timer (Чистый динамический URL)
         try:
             st7_url = f"https://7timer.info{d['lon']}&lat={d['lat']}&ac=0&unit=metric&output=json"
-            if "info5" in st7_url:
-                st7_url = st7_url.replace("info5", "info/bin/civil.php?lon=5")
-                
             res = requests.get(st7_url, headers=HEADERS, timeout=3.0)
             if res.status_code == 200:
                 ds = res.json().get("dataseries", [])
-                w_text = ds[0].get("weather", "clear") if (isinstance(ds, list) and len(ds) > 0) else "clear"
+                if isinstance(ds, list) and len(ds) > 0:
+                    w_text = ds[0].get("weather", "clear")
+                else:
+                    w_text = "clear"
                 probs["fallback_7timer"] = 85 if "rain" in w_text or "shower" in w_text else (35 if "cloud" in w_text else 10)
                 audit["fallback_7timer"], is_authentic["fallback_7timer"] = 24, True
                 district_matrix["fallback_7timer"][d["id"]] = "🟢"
@@ -136,7 +131,7 @@ def execute_hard_radar_fix(weights):
 with open("ufa_districts.geojson", "r", encoding="utf-8") as f:
     ufa_geo = json.load(f)
 
-fdata, matrix_data, adata, wdata = execute_hard_radar_fix(w)
+fdata, matrix_data, adata, wdata = fetch_radar_perfect_data(w)
 r_dict = {dist["name"]: dist["prob"] for dist in fdata}
 
 m = folium.Map(location=[54.745, 55.960], zoom_start=11, tiles="cartodbpositron")
@@ -160,7 +155,7 @@ for dist in fdata:
         )
     ).add_to(m)
 
-st_folium(m, width=900, height=520, key="ufa_map_v38")
+st_folium(m, width=900, height=520, key="ufa_map_v39")
 
 st.markdown("### 📊 Метеосводка по районам")
 for dist in fdata:
