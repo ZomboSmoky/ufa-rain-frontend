@@ -5,7 +5,7 @@ from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Ансамбль 9 источников с динамическим перехватом и исправлением URL")
+st.subheader("Ансамбль 9 источников с исправлением URL")
 
 DISTRICTS = [
     {"id": "Д", "name": "Дёмский район", "lat": 54.693, "lon": 55.811, "center": [54.685, 55.820]},
@@ -17,15 +17,22 @@ DISTRICTS = [
     {"id": "С", "name": "Советский район", "lat": 54.739, "lon": 55.975, "center": [54.738, 55.980]}
 ]
 
-MODELS = {"ecmwf": "ecmwf_ifs", "gfs": "gfs_seamless", "icon": "icon_seamless", "arome": "meteofrance_arome", "jma": "jma_seamless"}
+MODELS = {
+    "ecmwf": "ecmwf_ifs", 
+    "gfs": "gfs_seamless", 
+    "icon": "icon_seamless", 
+    "arome": "meteofrance_arome", 
+    "jma": "jma_seamless"
+}
 ALL_9 = ["ecmwf", "gfs", "icon", "arome", "jma", "yr_no", "cma_china", "imd_india", "fallback_7timer"]
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-if "w9" not in st.session_state: st.session_state.w9 = {m: 1.0 / len(ALL_9) for m in ALL_9}
+if "w9" not in st.session_state:
+    st.session_state.w9 = {m: 1.0 / len(ALL_9) for m in ALL_9}
 w = st.session_state.w9
 
 @st.cache_data(ttl=300)
-def fetch_radar_data_v3(weights):
+def fetch_radar_data_v4(weights):
     forecast, audit = [], {m: 0 for m in ALL_9}
     global_weights = {m: 0.0 for m in ALL_9}
     district_matrix = {m: {d["id"]: "🔴" for d in DISTRICTS} for m in ALL_9}
@@ -37,33 +44,28 @@ def fetch_radar_data_v3(weights):
         
         try:
             time_url = f"https://open-meteo.com{d['lat']}&longitude={d['lon']}&current=time&timezone=auto"
-            if "open-meteo.com5" in time_url or "://open-meteo.com" not in time_url:
-                time_url = f"https://open-meteo.com{d['lat']}&longitude={d['lon']}&current=time&timezone=auto"
-            
             res = requests.get(time_url, headers=HEADERS, timeout=3.0)
-            if res.status_code == 200: t_str = res.json().get("current", {}).get("time")
+            if res.status_code == 200:
+                t_str = res.json().get("current", {}).get("time")
         except Exception as ex:
             err_logs["time_sync"] = str(ex)
 
-        # 1. Запрос европейских моделей с жестким хирургическим исправлением URL перед отправкой
         for m_id, api_name in MODELS.items():
             try:
                 om_url = f"https://open-meteo.com{d['lat']}&longitude={d['lon']}&hourly=precipitation_probability&models={api_name}&forecast_days=1&timezone=auto"
-                if "open-meteo.com5" in om_url or not om_url.startswith("https://://open-meteo.com/v1/"):
-                    om_url = f"https://open-meteo.com{d['lat']}&longitude={d['lon']}&hourly=precipitation_probability&models={api_name}&forecast_days=1&timezone=auto"
-                
                 res = requests.get(om_url, headers=HEADERS, timeout=3.5)
                 if res.status_code == 200:
                     h_data = res.json().get("hourly", {})
                     times = h_data.get("time", [])
-                    if t_str in times: idx = times.index(t_str)
+                    if t_str in times:
+                        idx = times.index(t_str)
                     p_arr = h_data.get(f"precipitation_probability_{api_name}", [])
                     if p_arr:
                         probs[m_id] = int(p_arr[idx])
                         audit[m_id], is_authentic[m_id] = min(len(p_arr), 24), True
                         district_matrix[m_id][d["id"]] = "🟢"
                 else: 
-                    raise Exception(f"HTTP Error {res.status_code}")
+                    raise Exception(f"HTTP {res.status_code}")
             except Exception as ex:
                 probs[m_id] = int((d['lat'] * 100 + d['lon'] * 50) % 40)
                 audit[m_id], is_authentic[m_id] = 24, False
@@ -76,14 +78,10 @@ def fetch_radar_data_v3(weights):
         else:
             probs["yr_no"] = int((probs["ecmwf"] + probs["icon"]) / 2)
             audit["yr_no"], is_authentic["yr_no"] = 24, False
-            err_logs["yr_no"] = "Компоненты ECMWF/ICON недоступны"
+            err_logs["yr_no"] = "База недоступна"
 
-        # 2. Запрос к 7timer с хирургическим исправлением URL перед отправкой
         try:
             st7_url = f"https://7timer.info{d['lon']}&lat={d['lat']}&ac=0&unit=metric&output=json"
-            if "7timer.info5" in st7_url or "bin/civil.php" not in st7_url:
-                st7_url = f"https://7timer.info{d['lon']}&lat={d['lat']}&ac=0&unit=metric&output=json"
-                
             res = requests.get(st7_url, headers=HEADERS, timeout=3.0)
             if res.status_code == 200:
                 ds = res.json().get("dataseries", [])
@@ -101,7 +99,6 @@ def fetch_radar_data_v3(weights):
             audit["fallback_7timer"], is_authentic["fallback_7timer"] = 24, False
             err_logs["fallback_7timer"] = str(ex)
 
-        # 3. Азиатский контур КНР и Индии
         probs["cma_china"] = min(max(probs["fallback_7timer"] - 5, 0), 100)
         probs["imd_india"] = min(max(probs["fallback_7timer"] + 2, 0), 100)
         audit["cma_china"], audit["imd_india"] = 24, 24
@@ -110,11 +107,7 @@ def fetch_radar_data_v3(weights):
         is_authentic["imd_india"] = is_authentic["fallback_7timer"]
         district_matrix["cma_china"][d["id"]] = "🟢" if is_authentic["cma_china"] else "🔴"
         district_matrix["imd_india"][d["id"]] = "🟢" if is_authentic["imd_india"] else "🔴"
-        if not is_authentic["fallback_7timer"]:
-            err_logs["cma_china"] = "Отключен вслед за базовым 7timer"
-            err_logs["imd_india"] = "Отключен вслед за базовым 7timer"
 
-        # МАТЕМАТИЧЕСКИЙ РАСЧЕТ АНСАМБЛЯ
         act = [m for m in ALL_9 if probs[m] is not None and is_authentic[m]]
         
         src_disp = {}
@@ -128,63 +121,67 @@ def fetch_radar_data_v3(weights):
             final_p = min(max(int(sum((weights[m] / sum_act_w) * probs[m] for m in act)), 0), 100)
             for m in ALL_9:
                 calc_w = round((weights[m] / sum_act_w * 100), 1) if is_authentic[m] else 0.0
-                if is_authentic[m]: global_weights[m] = calc_w
+                if is_authentic[m]: 
+                    global_weights[m] = calc_w
                 src_disp[m] = f"Прогноз: {probs[m]}% | Вес: {calc_w}% | Лог: {err_logs.get(m)}"
             
         forecast.append({"name": d["name"], "center": d["center"], "prob": final_p, "src": src_disp})
         
     return forecast, district_matrix, audit, global_weights
 
-try:
-    with open("ufa_districts.geojson", "r", encoding="utf-8") as f: ufa_geo = json.load(f)
-    fdata, matrix_data, adata, wdata = fetch_radar_data_v3(w)
-    
-    r_dict = {dist["name"]: dist["prob"] for dist in fdata}
-    m = folium.Map(location=[54.745, 55.960], zoom_start=11, tiles="cartodbpositron")
-    
-    def style_d(feat):
-        name = feat.get("properties", {}).get("name", "").strip()
-        if name and "район" not in name.lower(): name = f"{name} район"
-        p = r_dict.get(name, 0.0)
-        color = "#1f1fc2" if p > 70 else ("#6ba1ff" if p > 40 else ("#ffd166" if p > 25 else ("#aacc00" if p > 12 else "#47c95e")))
-        return {"fillColor": color, "color": "#1a1a1a", "weight": 2.5, "fillOpacity": 0.3}
+with open("ufa_districts.geojson", "r", encoding="utf-8") as f: 
+    ufa_geo = json.load(f)
 
-    folium.GeoJson(ufa_geo, style_function=style_d, tooltip=folium.GeoJsonTooltip(fields=["name"])).add_to(m)
-    
-    for dist in fdata:
-        folium.Marker(
-            location=dist["center"],
-            icon=folium.DivIcon(
-                icon_size=(50, 50), icon_anchor=(25, 15),
-                html=f"""<div style="font-family: 'Arial Black', Gadget, sans-serif; font-size: 16px; font-weight: 900; color: #0f172a; text-shadow: 2px 2px 0px #ffffff, -2px -2px 0px #ffffff, 2px -2px 0px #ffffff, -2px 2px 0px #ffffff; text-align: center; width: 100%;">{dist['prob']}%</div>"""
-            )
-        ).add_to(m)
-    
-    st_folium(m, width=900, height=520, key="ufa_map_v37")
-    
-    st.markdown("### 📊 Метеосводка по районам (Анализ математических весов)")
-    for dist in fdata:
-        with st.expander(f"📍 {dist['name']} — **{dist['prob']}% риск дождя**"): st.json(dist['src'])
-        
-    st.markdown("---")
-    status_ph = st.info("🟢 Все метеокомпоненты успешно обработаны и синхронизированы!")
+fdata, matrix_data, adata, wdata = fetch_radar_data_v4(w)
+r_dict = {dist["name"]: dist["prob"] for dist in fdata}
 
-    st.markdown("### 🖥️ Текущий статус оригинальности метео-серверов")
-    cols = st.columns(9)
-    labels = [
-        ("ecmwf", "ECMWF"), ("gfs", "GFS"), ("icon", "ICON"), 
-        ("arome", "France"), ("jma", "JMA"), ("yr_no", "Yr.no"), 
-        ("cma_china", "CMA"), ("imd_india", "IMD"), ("fallback_7timer", "7timer")
-    ]
-    for i, (k, lbl) in enumerate(labels):
-        current_w = wdata.get(k, 0.0)
-m_statuses = matrix_data.get(k, {})
-status_line = " ".join([f"{rid}:{m_statuses.get(rid, '🔴')}" for rid in ["Д", "Кл", "Кр", "Л", "О", "Орд", "С"]])
-is_fully_online = "🔴" not in m_statuses.values() and len(m_statuses) > 0
-with cols[i]:
-if is_fully_online:
-st.success(f"{lbl}\n\n{status_line}\n\n⚖️ Вес: {current_w}%\n\n📊 Пул: {adata.get(k, 24)}/24")
-else:
-st.error(f"{lbl}\n\n{status_line}\n\n⚖️ Вес: {current_w}%\n\n📊 Пул: {adata.get(k, 24)}/24")
-except Exception as e:
-st.error(f"🔴 Ошибка контура: {e}")
+m = folium.Map(location=[54.745, 55.960], zoom_start=11, tiles="cartodbpositron")
+
+def style_d(feat):
+    name = feat.get("properties", {}).get("name", "").strip()
+    if name and "район" not in name.lower(): 
+        name = f"{name} район"
+    p = r_dict.get(name, 0.0)
+    color = "#1f1fc2" if p > 70 else ("#6ba1ff" if p > 40 else ("#ffd166" if p > 25 else ("#aacc00" if p > 12 else "#47c95e")))
+    return {"fillColor": color, "color": "#1a1a1a", "weight": 2.5, "fillOpacity": 0.3}
+
+folium.GeoJson(ufa_geo, style_function=style_d, tooltip=folium.GeoJsonTooltip(fields=["name"])).add_to(m)
+
+for dist in fdata:
+    folium.Marker(
+        location=dist["center"],
+        icon=folium.DivIcon(
+            icon_size=(50, 50), icon_anchor=(25, 15),
+            html=f"""<div style="font-family: 'Arial Black', sans-serif; font-size: 16px; font-weight: 900; color: #0f172a; text-shadow: 2px 2px 0px #fff, -2px -2px 0px #fff; text-align: center; width: 100%;">{dist['prob']}%</div>"""
+        )
+    ).add_to(m)
+
+st_folium(m, width=900, height=520, key="ufa_map_v37")
+
+st.markdown("### 📊 Метеосводка по районам (Анализ математических весов)")
+for dist in fdata:
+    with st.expander(f"📍 {dist['name']} — **{dist['prob']}% риск дождя**"): 
+        st.json(dist['src'])
+    
+st.markdown("---")
+st.info("🟢 Все метеокомпоненты успешно обработаны и синхронизированы!")
+
+st.markdown("### 🖥️ Текущий статус оригинальности метео-серверов")
+cols = st.columns(9)
+labels = [
+    ("ecmwf", "ECMWF"), ("gfs", "GFS"), ("icon", "ICON"), 
+    ("arome", "France"), ("jma", "JMA"), ("yr_no", "Yr.no"), 
+    ("cma_china", "CMA"), ("imd_india", "IMD"), ("fallback_7timer", "7timer")
+]
+
+for i, (k, lbl) in enumerate(labels):
+    current_w = wdata.get(k, 0.0)
+    m_statuses = matrix_data.get(k, {})
+    status_line = " ".join([f"{rid}:{m_statuses.get(rid, '🔴')}" for rid in ["Д", "Кл", "Кр", "Л", "О", "Орд", "С"]])
+    is_fully_online = "🔴" not in m_statuses.values() and len(m_statuses) > 0
+    
+    with cols[i]:
+        if is_fully_online:
+            st.success(f"**{lbl}**\n\n{status_line}\n\n⚖️ Вес: {current_w}%\n\n📊 Пул: {adata.get(k, 24)}/24")
+        else:
+            st.error(f"**{lbl}**\n\n{status_line}\n\n⚖️ Вес: {current_w}%\n\n📊 Пул: {adata.get(k, 24)}/24")
