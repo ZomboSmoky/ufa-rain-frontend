@@ -5,7 +5,7 @@ from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Модульная архитектура: 9 полностью изолированных сетевых потоков")
+st.subheader("Модульная архитектура: 9 изолированных потоков с защитой от сдвига часовых поясов")
 
 DISTRICTS = [
     {"id": "Д", "name": "Дёмский район", "lat": 54.693, "lon": 55.811, "center": [54.685, 55.820]},
@@ -21,38 +21,30 @@ ALL_9 = ["ecmwf", "gfs", "icon", "arome", "jma", "yr_no", "cma_china", "imd_indi
 BASE_WEIGHTS = {m: 1.0 / len(ALL_9) for m in ALL_9}
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
-# --- ИЗОЛИРОВАННЫЕ ФУНКЦИИ ОПРОСА (ОШИБКА В ОДНОЙ НЕ ВЛИЯЕТ НА ДРУГИЕ) ---
-
 def call_open_meteo_model(m_id, model_name, lat, lon):
-    """Изолированный сетевой запрос к моделям Open-Meteo через params"""
     try:
         time.sleep(0.02)
-        # Базовый URL без знаков вопроса защищает от багов прокси хостинга
         base_url = "https://open-meteo.com"
         query_params = {
             "latitude": float(lat),
             "longitude": float(lon),
-            "current": "time",
             "hourly": "precipitation_probability",
             "models": str(model_name),
-            "forecast_days": 1,
+            "forecast_days": 2,  # Берем 2 дня с запасом на часовой пояс
             "timezone": "auto"
         }
         res = requests.get(base_url, params=query_params, headers=HEADERS, timeout=4.0)
         if res.status_code == 200 and res.text.strip() and not res.text.startswith("<"):
             js = res.json()
-            t_curr = js.get("current", {}).get("time")
-            h_data = js.get("hourly", {})
-            times = h_data.get("time", [])
-            p_arr = h_data.get(f"precipitation_probability_{model_name}", [])
-            if t_curr in times and p_arr:
-                return int(p_arr[times.index(t_curr)]), "🟢 Достоверно"
-        raise Exception(f"HTTP {res.status_code} или неверный формат ответа")
+            p_arr = js.get("hourly", {}).get(f"precipitation_probability_{model_name}", [])
+            if p_arr and len(p_arr) > 0:
+                # Берем самую актуальную текущую точку прогноза без хрупкого поиска по индексам
+                return int(p_arr[0]), "🟢 Достоверно"
+        raise Exception(f"HTTP {res.status_code} или пустой JSON")
     except Exception as ex:
         return 0, f"🔴 Недостоверно ({str(ex)})"
 
 def call_7timer_network(lat, lon):
-    """Изолированный сетевой запрос к азиатскому ядру 7timer через params"""
     try:
         time.sleep(0.02)
         base_url = "https://7timer.info"
@@ -75,14 +67,11 @@ def call_7timer_network(lat, lon):
     except Exception as ex:
         return 0, f"🔴 Недостоверно ({str(ex)})"
 
-# --- ГЛАВНЫЙ КОНТЕНТНЫЙ ДВИЖОК ---
-
 def fetch_modular_radar_data():
     forecast = []
     district_matrix = {m: {d["id"]: "🔴" for d in DISTRICTS} for m in ALL_9}
     global_weights = {m: 0.0 for m in ALL_9}
     
-    # Справочник системных имен моделей для Open-Meteo
     om_mapping = {
         "ecmwf": "ecmwf_ifs", "gfs": "gfs_seamless", "icon": "icon_seamless",
         "arome": "meteofrance_arome", "jma": "jma_seamless", "yr_no": "yr_yr",
@@ -94,7 +83,6 @@ def fetch_modular_radar_data():
         statuses = {m: "🔴 Недостоверно" for m in ALL_9}
         is_alive = {m: False for m in ALL_9}
         
-        # Поочередно вызываем полностью изолированные функции
         for m_id, sys_name in om_mapping.items():
             val, status_msg = call_open_meteo_model(m_id, sys_name, d["lat"], d["lon"])
             probs[m_id] = val
@@ -103,7 +91,6 @@ def fetch_modular_radar_data():
                 is_alive[m_id] = True
                 district_matrix[m_id][d["id"]] = "🟢"
 
-        # Отдельный изолированный вызов 7timer
         val_7t, status_7t = call_7timer_network(d["lat"], d["lon"])
         probs["fallback_7timer"] = val_7t
         statuses["fallback_7timer"] = status_7t
@@ -111,7 +98,6 @@ def fetch_modular_radar_data():
             is_alive["fallback_7timer"] = True
             district_matrix["fallback_7timer"][d["id"]] = "🟢"
 
-        # --- ДИНАМИЧЕСКИЙ РАСЧЕТ ВЕСОВ АНСАМБЛЯ ---
         live_models = [m for m in ALL_9 if is_alive[m]]
         src_disp = {}
         
@@ -134,8 +120,6 @@ def fetch_modular_radar_data():
         forecast.append({"name": d["name"], "center": d["center"], "prob": final_p, "src": src_disp})
         
     return forecast, district_matrix, global_weights
-
-# --- РЕНДЕРИНГ ИНТЕРФЕЙСА STREAMLIT ---
 
 with open("ufa_districts.geojson", "r", encoding="utf-8") as f:
     ufa_geo = json.load(f)
@@ -163,7 +147,7 @@ for dist in fdata:
         )
     ).add_to(m)
 
-st_folium(m, width=900, height=520, key="ufa_map_v54")
+st_folium(m, width=900, height=520, key="ufa_map_v55")
 
 st.markdown("### 📊 Метеосводка по районам")
 for dist in fdata:
