@@ -2,11 +2,10 @@ import streamlit as st
 import requests, folium, json
 from streamlit_folium import st_folium
 
+# 1. ЗАГОЛОВОК И НАСТРОЙКИ СТРАНИЦЫ
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
 st.subheader("Динамический ансамбль 9 источников с адаптивным учетом работающих сетей")
-
-status_ph = st.info("⏳ Синхронизация спутниковых потоков и аудит метеополей...")
 
 DISTRICTS = [
     {"name": "Дёмский район", "lat": 54.693, "lon": 55.811, "center": [54.685, 55.820]},
@@ -40,7 +39,6 @@ def fetch_radar_data(weights):
             if res.status_code == 200: t_str = res.json().get("current", {}).get("time")
         except: pass
 
-        # 1. Запрос европейских и американских моделей
         for m_id, api_name in MODELS.items():
             try:
                 res = requests.get(f"https://open-meteo.com{d['lat']}&longitude={d['lon']}&hourly=precipitation_probability&models={api_name}&forecast_days=1&timezone=auto", headers=HEADERS, timeout=3.5)
@@ -59,7 +57,6 @@ def fetch_radar_data(weights):
                 audit[m_id], is_authentic[m_id] = 24, False
                 display_statuses[m_id] = "🔴 БЛОКИРОВКА (0% веса)"
 
-        # Корректировка Yr.no
         if probs["ecmwf"] is not None and is_authentic["ecmwf"] and is_authentic["icon"]:
             probs["yr_no"] = int((probs["ecmwf"] + probs["icon"]) / 2)
             audit["yr_no"], is_authentic["yr_no"] = audit["ecmwf"], True
@@ -69,7 +66,6 @@ def fetch_radar_data(weights):
             audit["yr_no"], is_authentic["yr_no"] = 24, False
             display_statuses["yr_no"] = "🔴 БЛОКИРОВКА (0% веса)"
 
-        # 2. Запрос 7timer (Резервный канал) — если он отвечает, он ОРИГИНАЛ
         try:
             res = requests.get(f"https://7timer.info{d['lon']}&lat={d['lat']}&ac=0&unit=metric&output=json", headers=HEADERS, timeout=3.0)
             ds = res.json().get("dataseries", []) if res.status_code == 200 else []
@@ -82,7 +78,6 @@ def fetch_radar_data(weights):
             audit["fallback_7timer"], is_authentic["fallback_7timer"] = 24, False
             display_statuses["fallback_7timer"] = "🔴 БЛОКИРОВКА (0% веса)"
 
-        # 3. Азиатский спутниковый контур КНР и Индии — они выдают реальные данные, значит они ОРИГИНАЛЫ
         probs["cma_china"] = min(max(probs["fallback_7timer"] - 5, 0), 100)
         probs["imd_india"] = min(max(probs["fallback_7timer"] + 2, 0), 100)
         audit["cma_china"], audit["imd_india"] = 24, 24
@@ -92,7 +87,6 @@ def fetch_radar_data(weights):
         display_statuses["cma_china"] = "🟢 ОРИГИНАЛ" if is_authentic["cma_china"] else "🔴 БЛОКИРОВКА (0% веса)"
         display_statuses["imd_india"] = "🟢 ОРИГИНАЛ" if is_authentic["imd_india"] else "🔴 БЛОКИРОВКА (0% веса)"
 
-        # СТРОГАЯ МАТЕМАТИКА АНСАМБЛЯ ПО РАБОТАЮЩИМ ИСТОЧНИКАМ
         act = [m for m in ALL_9 if probs[m] is not None and is_authentic[m]]
         
         if not act:
@@ -116,8 +110,8 @@ def fetch_radar_data(weights):
 try:
     with open("ufa_districts.geojson", "r", encoding="utf-8") as f: ufa_geo = json.load(f)
     fdata, tdata, adata, wdata = fetch_radar_data(w)
-    status_ph.success("🟢 Все метеокомпоненты успешно обработаны и синхронизированы!")
     
+    # 2. БЛОК С ДАННЫМИ ПО РАЙОНАМ (КАРТА И ТЕКСТ)
     r_dict = {dist["name"]: dist["prob"] for dist in fdata}
     m = folium.Map(location=[54.745, 55.960], zoom_start=11, tiles="cartodbpositron")
     
@@ -139,8 +133,18 @@ try:
             )
         ).add_to(m)
     
-    st_folium(m, width=900, height=520, key="ufa_map_v27")
+    st_folium(m, width=900, height=520, key="ufa_map_v28")
     
+    st.markdown("### 📊 Метеосводка по районам (Анализ математических весов)")
+    for dist in fdata:
+        with st.expander(f"📍 {dist['name']} — **{dist['prob']}% риск дождя**"): st.json(dist['src'])
+        
+    st.markdown("---")
+
+    # 3. ОТЛАДОЧНАЯ СТРОКА СТАТУСА
+    status_ph = st.info("🟢 Все метеокомпоненты успешно обработаны и синхронизированы!")
+
+    # 4. БЛОКИ С ИСТОЧНИКАМИ ДАННЫХ
     st.markdown("### 🖥️ Текущий статус оригинальности метео-серверов")
     cols = st.columns(9)
     labels = [
@@ -157,8 +161,5 @@ try:
             else:
                 st.error(f"**{lbl}**\n\n{status_text}\n\n⚖️ Вес: {current_w}%\n\n📊 Пул: {adata.get(k, 24)}/24")
 
-    st.markdown("### 📊 Метеосводка по районам (Анализ математических весов)")
-    for dist in fdata:
-        with st.expander(f"📍 {dist['name']} — **{dist['prob']}% риск дождя**"): st.json(dist['src'])
 except Exception as e:
-    status_ph.error(f"🔴 Ошибка контура: {e}")
+    st.error(f"🔴 Ошибка контура: {e}")
