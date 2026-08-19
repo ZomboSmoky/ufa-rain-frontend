@@ -1,11 +1,12 @@
 import streamlit as st
 import requests, folium, json, time, random
 import numpy as np
+from datetime import datetime
 from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Раздельная архитектура: 8 моделей на Open-Meteo + изолированный 7timer через CORS-Proxy")
+st.subheader("Монолитная архитектура: Ручной API-домен и CORS-Proxy шлюзование")
 
 # Координатная сетка районов Уфы
 DISTRICT_COORDS = [
@@ -26,30 +27,32 @@ OM_MAPPING = {
 ALL_9 = ["ecmwf", "gfs", "icon", "arome", "jma", "yr_no", "cma_china", "imd_india", "fallback_7timer"]
 BASE_WEIGHTS = {m: 1.0 / len(ALL_9) for m in ALL_9}
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-PROXY_PREFIX = "https://allorigins.win"
+PROXY_SHIELD = "https://corsproxy.io"
 
-# --- ПРОГРАММНЫЙ ГЕНЕРАТОР СТАТИЧЕСКИХ URL-АДРЕСОВ ПРИ СТАРТЕ ---
+# --- ПРОГРАММНЫЙ СБОРЩИК ФИКСИРОВАННЫХ ССЫЛОК ---
 DISTRICTS = []
+current_date_str = datetime.now().strftime("%Y-%m-%d")
+
 for d in DISTRICT_COORDS:
     urls_pool = {}
     
-    # 1. Сборка ссылок для 8 моделей Open-Meteo (включая Китай CMA и Индию IMD)
+    # Сборка ссылок ЧЕРЕЗ ФИЗИЧЕСКИ ВПИСАННЫЙ API-ДОМЕН ОПЕН-МЕТЕО
     for m_id, sys_name in OM_MAPPING.items():
-        urls_pool[m_id] = f"https://open-meteo.com{d['lat']}&longitude={d['lon']}&hourly=precipitation_probability&models={sys_name}&forecast_days=1&timezone=auto"
+        urls_pool[m_id] = f"https://open-meteo.com{d['lat']}&longitude={d['lon']}&hourly=precipitation_probability&models={sys_name}&start_date={current_date_str}&end_date={current_date_str}&timezone=auto"
     
-    # 2. Сборка ссылки строго на родной сервер 7timer без смешивания с Open-Meteo
+    # Сборка ссылки на родной сервер 7timer
     urls_pool["fallback_7timer"] = f"https://7timer.info{d['lon']}&lat={d['lat']}&ac={random.randint(1,99)}&unit=metric&output=json"
     
     DISTRICTS.append({
         "id": d["id"], "name": d["name"], "center": d["center"], "urls": urls_pool
     })
 
-# --- ИЗОЛИРОВАННЫЙ СЕТЕВОЙ КОНТУР ---
+# --- ИЗОЛИРОВАННЫЙ СЕТЕВОЙ КОНТУР ОПРОСА ---
 def execute_isolated_request(raw_target_url, is_open_meteo=True, model_key=None):
     try:
-        time.sleep(0.04) # Защитный интервал от DDOS-триггеров
-        proxied_url = f"{PROXY_PREFIX}{requests.utils.quote(raw_target_url)}"
-        res = requests.get(proxied_url, headers=HEADERS, timeout=6.5)
+        time.sleep(0.05)
+        proxied_url = f"{PROXY_SHIELD}{raw_target_url}"
+        res = requests.get(proxied_url, headers=HEADERS, timeout=7.0)
         
         if res.status_code == 200 and res.text.strip() and not res.text.startswith("<"):
             cleaned_text = res.text.strip().lstrip('\ufeff')
@@ -59,16 +62,15 @@ def execute_isolated_request(raw_target_url, is_open_meteo=True, model_key=None)
                 sys_model_name = OM_MAPPING.get(model_key)
                 p_arr = js.get("hourly", {}).get(f"precipitation_probability_{sys_model_name}", [])
                 if p_arr and len(p_arr) > 0:
-                    return int(p_arr[0]), "🟢 Достоверно (Фикс Сети)"
+                    return int(p_arr), "🟢 Достоверно (Сеть через Прокси)"
             else:
-                # Извлекаем данные из оригинального ответа 7timer
                 ds = js.get("dataseries", [])
-                w_text = ds[0].get("weather", "clear") if (isinstance(ds, list) and len(ds) > 0) else "clear"
+                w_text = ds.get("weather", "clear") if (isinstance(ds, list) and len(ds) > 0) else "clear"
                 prob = 85 if "rain" in w_text or "shower" in w_text else (40 if "cloud" in w_text else 10)
-                return prob, "🟢 Достоверно (Фикс Сети)"
+                return prob, "🟢 Достоверно (Сеть через Прокси)"
     except:
         pass
-    return 0, "🔴 Недостоверно (Блокировка хостинга)"
+    return 0, "🔴 Недостоверно (Блокировка хостинга / Таймаут)"
 
 def fetch_static_radar_data():
     forecast = []
@@ -80,7 +82,6 @@ def fetch_static_radar_data():
         statuses = {m: "🔴 Недостоверно" for m in ALL_9}
         is_alive = {m: False for m in ALL_9}
         
-        # Поочередный опрос каждого источника в изоляции
         for m_id in ALL_9:
             target_url = d["urls"][m_id]
             is_om = (m_id != "fallback_7timer")
@@ -90,7 +91,6 @@ def fetch_static_radar_data():
                 is_alive[m_id] = True
                 district_matrix[m_id][d["id"]] = "🟢"
 
-        # --- ДИНАМИЧЕСКИЙ ПЕРЕСЧЕТ ВЕСОВ АНСАМБЛЯ ДЛЯ РАЙОНА ---
         live_models = [m for m in ALL_9 if is_alive[m]]
         src_disp = {}
         
@@ -111,7 +111,7 @@ def fetch_static_radar_data():
         forecast.append({"name": d["name"], "center": d["center"], "prob": final_p, "src": src_disp})
     return forecast, district_matrix, global_weights
 
-# --- РЕНДЕРИНГ ИНТЕРФЕЙСА STREAMLIT И FOLIUM ---
+# --- РЕНДЕРИНГ ИНТЕРФЕЙСА ---
 with open("ufa_districts.geojson", "r", encoding="utf-8") as f:
     ufa_geo = json.load(f)
 
@@ -138,11 +138,11 @@ for dist in fdata:
         )
     ).add_to(m)
 
-st_folium(m, width=900, height=520, key="ufa_map_v63")
+st_folium(m, width=900, height=520, key="ufa_map_v67")
 
 st.markdown("### 📊 Метеосводка по районам")
 for dist in fdata:
-    with st.expander(f"📍 {dist['name']} — **{dist['prob']}% риск**"):
+    with st.expander(f"📍 {dist['name']} — **{dist['prob']}% risk**"):
         st.json(dist['src'])
     
 st.markdown("---")
