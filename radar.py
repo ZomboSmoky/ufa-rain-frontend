@@ -5,7 +5,7 @@ from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Полная доменная изоляция: Европа, Азия и 7timer разделены")
+st.subheader("Кристально честная метеосводка: нулевая толерантность к фейковым данным")
 
 DISTRICTS = [
     {"id": "Д", "name": "Дёмский район", "lat": 54.693, "lon": 55.811, "center": [54.685, 55.820]},
@@ -21,10 +21,9 @@ ALL_9 = ["ecmwf", "gfs", "icon", "arome", "jma", "yr_no", "cma_china", "imd_indi
 BASE_WEIGHTS = {m: 1.0 / len(ALL_9) for m in ALL_9}
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
-# --- ПОЛНОСТЬЮ РАЗДЕЛЕННЫЕ ИЗОЛИРОВАННЫЕ СЕТЕВЫЕ ПОТОКИ ---
+# --- ИСКЛЮЧИТЕЛЬНО НАСТОЯЩИЙ СЕТЕВОЙ ОПРОС БЕЗ МАТЕМАТИЧЕСКИХ ЗАГЛУШЕК ---
 
 def get_europe_model(model_name, lat, lon):
-    """Контур 1: Основной сервер прогнозов (Европа/США/Япония)"""
     try:
         time.sleep(0.02)
         res = requests.get(
@@ -34,32 +33,32 @@ def get_europe_model(model_name, lat, lon):
         )
         if res.status_code == 200 and not res.text.startswith("<"):
             p_arr = res.json().get("hourly", {}).get(f"precipitation_probability_{model_name}", [])
-            if p_arr: return int(p_arr[0]), "🟢 Достоверно"
+            if p_arr: 
+                return int(p_arr[0]), "... Достоверно (Сеть)"
     except: pass
     return 0, "🔴 Недостоверно (Домен заблокирован)"
 
 def get_asian_archive_model(model_name, lat, lon):
-    """Контур 2: Независимый шлюз (Китай CMA, Индия IMD, Норвегия Yr.no)"""
+    """Опрос Китая, Индии и Норвегии с жестким падением в красный статус при бане"""
     try:
         time.sleep(0.02)
-        # Переводим Азию на другой домен, который не пересекается с блокировками forecast
+        # Запрашиваем вчерашний день, данные за который гарантированно сформированы в архиве
         res = requests.get(
             "https://open-meteo.com",
-            params={"latitude": float(lat), "longitude": float(lon), "hourly": "precipitation", "models": model_name, "start_date": "2026-08-18", "end_date": "2026-08-19"},
+            params={"latitude": float(lat), "longitude": float(lon), "hourly": "precipitation", "models": model_name, "start_date": "2026-08-18", "end_date": "2026-08-18"},
             headers=HEADERS, timeout=3.5
         )
         if res.status_code == 200 and not res.text.startswith("<"):
             p_arr = res.json().get("hourly", {}).get(f"precipitation_{model_name}", [])
-            if p_arr: 
-                # Переводим мм осадков архива в проценты вероятности радара
-                prob = min(int(float(p_arr[-1]) * 100), 95) if float(p_arr[-1]) > 0 else 15
-                return prob, "🟢 Достоверно"
+            if p_arr and len(p_arr) > 0: 
+                # Переводим мм осадков в процентную вероятность
+                prob = min(int(float(p_arr[-1]) * 100), 95) if float(p_arr[-1]) > 0 else 10
+                return prob, "🟢 Достоверно (Сеть Архив)"
     except: pass
-    # Если архив недоступен, берем резервный рассчет, но не ломаем скрипт
-    return int((float(lat)*45 + float(lon)*25) % 35), "🟢 Достоверно (Локальное ядро)"
+    # Больше никакого возврата формул с координатами. Только жесткий сетевой отказ!
+    return 0, "🔴 Недостоверно (Ошибка сети / Бан IP архива)"
 
 def get_7timer_isolated(lat, lon):
-    """Контур 3: Выделенный сервер 7timer со случайным шумовым ID от банов"""
     try:
         time.sleep(0.03)
         res = requests.get(
@@ -74,11 +73,11 @@ def get_7timer_isolated(lat, lon):
                 ds = js.get("dataseries", [])
                 w_text = ds[0].get("weather", "clear") if (isinstance(ds, list) and len(ds) > 0) else "clear"
                 prob = 85 if "rain" in w_text or "shower" in w_text else (40 if "cloud" in w_text else 10)
-                return prob, "🟢 Достоверно"
+                return prob, "🟢 Достоверно (Сеть 7timer)"
     except: pass
-    return int((float(lat)*60 + float(lon)*40) % 30), "🟢 Достоверно (Резерв Азии)"
+    return 0, "🔴 Недостоверно (Ошибка сети 7timer)"
 
-# --- СБОРКА АНСАМБЛЯ РАДАРА ---
+# --- АНСАНБЛЕВЫЙ ПРОЦЕССОР ---
 
 def fetch_isolated_radar_data():
     forecast = []
@@ -90,7 +89,6 @@ def fetch_isolated_radar_data():
         statuses = {m: "🔴 Недостоверно" for m in ALL_9}
         is_alive = {m: False for m in ALL_9}
         
-        # 1. Опрашиваем европейское ядро
         euro_map = {"ecmwf": "ecmwf_ifs", "gfs": "gfs_seamless", "icon": "icon_seamless", "arome": "meteofrance_arome", "jma": "jma_seamless"}
         for m_id, sys_name in euro_map.items():
             val, msg = get_europe_model(sys_name, d["lat"], d["lon"])
@@ -99,7 +97,6 @@ def fetch_isolated_radar_data():
                 is_alive[m_id] = True
                 district_matrix[m_id][d["id"]] = "🟢"
                 
-        # 2. Опрашиваем независимый азиатский архив (Китай, Индия, Норвегия)
         asia_map = {"cma_china": "cma_graphes", "imd_india": "imd_gfs", "yr_no": "yr_yr"}
         for m_id, sys_name in asia_map.items():
             val, msg = get_asian_archive_model(sys_name, d["lat"], d["lon"])
@@ -108,19 +105,17 @@ def fetch_isolated_radar_data():
                 is_alive[m_id] = True
                 district_matrix[m_id][d["id"]] = "🟢"
 
-        # 3. Опрашиваем изолированный 7timer
         val_7t, msg_7t = get_7timer_isolated(d["lat"], d["lon"])
         probs["fallback_7timer"], statuses["fallback_7timer"] = val_7t, msg_7t
         if "🟢" in msg_7t:
             is_alive["fallback_7timer"] = True
             district_matrix["fallback_7timer"][d["id"]] = "🟢"
 
-        # --- МАТЕМАТИЧЕСКИЙ РАСЧЕТ ВЕСОВ АНСАМБЛЯ ---
         live_models = [m for m in ALL_9 if is_alive[m]]
         src_disp = {}
         
         if not live_models:
-            final_p = 10
+            final_p = 0
             for m in ALL_9: src_disp[m] = f"Прогноз: 0% | Вес: 0.0% | Состояние: {statuses[m]}"
         else:
             sum_base_w = sum(BASE_WEIGHTS[m] for m in live_models)
@@ -138,7 +133,7 @@ def fetch_isolated_radar_data():
         
     return forecast, district_matrix, global_weights
 
-# --- РЕНДЕРИНГ ИНТЕРФЕЙСА STREAMLIT ---
+# --- ИНТЕРФЕЙС FOLIUM И STREAMLIT ---
 
 with open("ufa_districts.geojson", "r", encoding="utf-8") as f:
     ufa_geo = json.load(f)
@@ -166,7 +161,7 @@ for dist in fdata:
         )
     ).add_to(m)
 
-st_folium(m, width=900, height=520, key="ufa_map_v56")
+st_folium(m, width=900, height=520, key="ufa_map_v58")
 
 st.markdown("### 📊 Метеосводка по районам")
 for dist in fdata:
