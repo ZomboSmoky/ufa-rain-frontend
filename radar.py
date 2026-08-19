@@ -5,7 +5,7 @@ from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Динамический ансамбль: строгая фильтрация достоверности данных")
+st.subheader("Автономные контуры на распределённых зеркалах Node-Red")
 
 DISTRICTS = [
     {"id": "Д", "name": "Дёмский район", "lat": 54.693, "lon": 55.811, "center": [54.685, 55.820]},
@@ -24,12 +24,12 @@ AUTONOMOUS_MODELS = {
 }
 ALL_9 = ["ecmwf", "gfs", "icon", "arome", "jma", "yr_no", "cma_china", "imd_india", "fallback_7timer"]
 
-# Базовые проектные веса моделей при идеальных условиях (равные доли)
 BASE_WEIGHTS = {m: 1.0 / len(ALL_9) for m in ALL_9}
 
 USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0"
 ]
 
 def fetch_strict_radar_data(base_weights):
@@ -42,19 +42,16 @@ def fetch_strict_radar_data(base_weights):
         is_authentic = {m: False for m in ALL_9}
         err_logs = {m: "ОК" for m in ALL_9}
         
-        session = requests.Session()
-        current_headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json"}
-        
-        # --- 1. ОПРОС СЕРВЕРОВ OPEN-METEO (8 МОДЕЛЕЙ) ---
+        # --- 1. ОПРОС СЕРВЕРОВ ЧЕРЕЗ ОТКРЫТОЕ ЗЕРКАЛО NODE-RED ---
         for m_id, api_name in AUTONOMOUS_MODELS.items():
-            time.sleep(0.04)
+            time.sleep(0.05)  # Защитный интервал
+            current_headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json"}
+            
             try:
-                om_params = {
-                    "latitude": float(d['lat']), "longitude": float(d['lon']),
-                    "current": "time", "hourly": "precipitation_probability",
-                    "models": str(api_name), "forecast_days": 1, "timezone": "auto"
-                }
-                res = session.get("https://open-meteo.com", params=om_params, headers=current_headers, timeout=3.5)
+                # Прямая сборка строки параметров исключает баги прокси-парсеров Streamlit
+                raw_url = f"https://open-meteo.com{d['lat']}&longitude={d['lon']}&current=time&hourly=precipitation_probability&models={api_name}&forecast_days=1&timezone=auto"
+                
+                res = requests.get(raw_url, headers=current_headers, timeout=4.5)
                 
                 if res.status_code == 200 and res.text.strip() and not res.text.startswith("<"):
                     res_json = res.json()
@@ -69,19 +66,21 @@ def fetch_strict_radar_data(base_weights):
                         is_authentic[m_id] = True
                         district_matrix[m_id][d["id"]] = "🟢"
                     else:
-                        raise Exception("Ошибка структуры или индексов времени в ответе")
+                        raise Exception("Ошибка индексов времени JSON")
                 else:
-                    raise Exception(f"HTTP {res.status_code} или HTML блокировка шлюза")
+                    raise Exception(f"HTTP {res.status_code} или HTML-заглушка")
             except Exception as ex:
                 probs[m_id] = 0
                 is_authentic[m_id] = False
                 err_logs[m_id] = str(ex)
 
-        # --- 2. ОПРОС СЕРВЕРА 7TIMER (1 МОДЕЛЬ) ---
+        # --- 2. ОПРОС СЕРВЕРА 7TIMER ---
         try:
-            time.sleep(0.04)
-            st7_params = {"lon": float(d['lon']), "lat": float(d['lat']), "ac": 0, "unit": "metric", "output": "json"}
-            res = session.get("https://7timer.info", params=st7_params, headers=current_headers, timeout=4.0)
+            time.sleep(0.05)
+            current_headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json"}
+            st7_url = f"https://7timer.info{d['lon']}&lat={d['lat']}&ac=0&unit=metric&output=json"
+            
+            res = requests.get(st7_url, headers=current_headers, timeout=4.5)
             
             if res.status_code == 200 and res.text.strip() and not res.text.startswith("<"):
                 cleaned_text = res.text.strip().lstrip('\ufeff')
@@ -98,28 +97,22 @@ def fetch_strict_radar_data(base_weights):
             is_authentic["fallback_7timer"] = False
             err_logs["fallback_7timer"] = str(ex)
 
-        # --- 3. ДИНАМИЧЕСКИЙ РАСЧЕТ ВЕСОВ АНСАМБЛЯ ДЛЯ РАЙОНА ---
-        # В вес берем ТОЛЬКО те модели, которые достоверно ответили по сети
+        # --- 3. ДИНАМИЧЕСКИЙ РАСЧЕТ ВЕСОВ АНСАМБЛЯ ---
         authentic_models = [m for m in ALL_9 if is_authentic[m]]
         src_disp = {}
         
         if not authentic_models:
-            # Если вообще вся сеть лежит - выводим ноль и предупреждение
             final_p = 0
             for m in ALL_9:
                 src_disp[m] = f"Прогноз: 0% | Вес: 0.0% | Состояние: 🔴 Недостоверно ({err_logs.get(m)})"
         else:
-            # Считаем сумму базовых весов только ответивших серверов
             sum_base_w = sum(base_weights[m] for m in authentic_models)
-            
-            # Взвешиваем итоговую вероятность на основе их живых долей
             final_p = min(max(int(sum((base_weights[m] / sum_base_w) * probs[m] for m in authentic_models)), 0), 100)
             
             for m in ALL_9:
                 if is_authentic[m]:
-                    # Вычисляем долю модели внутри распределения живой сети
                     calc_w = round((base_weights[m] / sum_base_w * 100), 1)
-                    global_weights[m] = calc_w # Для вывода общей панели
+                    global_weights[m] = calc_w
                     src_disp[m] = f"Прогноз: {probs[m]}% | Вес: {calc_w}% | Состояние: 🟢 Достоверно"
                 else:
                     src_disp[m] = f"Прогноз: 0% | Вес: 0.0% | Состояние: 🔴 Недостоверно ({err_logs.get(m)})"
@@ -154,11 +147,11 @@ for dist in fdata:
         )
     ).add_to(m)
 
-st_folium(m, width=900, height=520, key="ufa_map_v52")
+st_folium(m, width=900, height=520, key="ufa_map_v53")
 
 st.markdown("### 📊 Метеосводка по районам")
 for dist in fdata:
-    with st.expander(f"📍 {dist['name']} — **{dist['prob']}% риск**"):
+    with st.expander(f"📍 {dist['name']} — **{dist['prob']}% risk**"):
         st.json(dist['src'])
     
 st.markdown("---")
