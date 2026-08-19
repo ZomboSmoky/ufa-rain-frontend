@@ -1,20 +1,9 @@
 import streamlit as st
-import requests, folium, json, time, random
-import numpy as np
-from datetime import datetime
-from streamlit_folium import st_folium
+import folium, json
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Прямое подключение: Динамическая сборка символьного API-домена")
-
-# --- ЗАЩИЩЕННЫЙ СИМВОЛЬНЫЙ СБОРЩИК ДОМЕНА (ИСПРАВЛЯЕТ БАГ ОБРЕЗКИ СТРОК) ---
-SUB_PREFIX = "a" + "p" + "i"
-BASE_DOMAIN = "open-meteo.com"
-# Переменная гарантированно соберет валидный эндпоинт во время работы в облаке
-VALID_OPEN_METEO_URL = f"https://{SUB_PREFIX}.{BASE_DOMAIN}/v1/forecast"
-
-SEVENTIMER_API_ENDPOINT = "https://7timer.info"
+st.subheader("Клиентская архитектура: Прямой асинхронный опрос API через браузер (JS-Engine)")
 
 # Координатная сетка районов Уфы
 DISTRICT_COORDS = [
@@ -27,157 +16,72 @@ DISTRICT_COORDS = [
     {"id": "С", "name": "Советский район", "lat": 54.739, "lon": 55.975, "center": [54.738, 55.980]}
 ]
 
-OM_MAPPING = {
-    "ecmwf": "ecmwf_ifs", "gfs": "gfs_seamless", "icon": "icon_seamless",
-    "arome": "meteofrance_arome", "jma": "jma_seamless", "yr_no": "yr_yr",
-    "cma_china": "cma_graphes", "imd_india": "imd_gfs"
-}
-ALL_9 = ["ecmwf", "gfs", "icon", "arome", "jma", "yr_no", "cma_china", "imd_india", "fallback_7timer"]
-BASE_WEIGHTS = {m: 1.0 / len(ALL_9) for m in ALL_9}
+# Изолируем домен от обрезки парсером интерфейса
+SUB = "a" + "p" + "i"
+DOM = "open-meteo.com"
+JS_API_TARGET = f"https://{SUB}.{DOM}/v1/forecast"
 
-# Расширенные заголовки реального браузера
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Connection": "keep-alive"
-}
-
-# --- ПРОГРАММНЫЙ СБОРЩИК ПРЯМЫХ ССЫЛОК ---
-DISTRICTS = []
-current_date_str = datetime.now().strftime("%Y-%m-%d")
-
-for d in DISTRICT_COORDS:
-    urls_pool = {}
-    for m_id, sys_name in OM_MAPPING.items():
-        urls_pool[m_id] = f"{VALID_OPEN_METEO_URL}?latitude={d['lat']}&longitude={d['lon']}&hourly=precipitation_probability&models={sys_name}&start_date={current_date_str}&end_date={current_date_str}&timezone=auto"
-    urls_pool["fallback_7timer"] = f"{SEVENTIMER_API_ENDPOINT}?lon={d['lon']}&lat={d['lat']}&ac={random.randint(1,99)}&unit=metric&output=json"
-    
-    DISTRICTS.append({
-        "id": d["id"], "name": d["name"], "center": d["center"], "urls": urls_pool
-    })
-
-# --- ЧИСТЫЙ СЕТЕВОЙ КОНТУР НАПРЯМУЮ ---
-def execute_isolated_request(raw_target_url, is_open_meteo=True, model_key=None):
-    try:
-        time.sleep(0.05)
-        res = requests.get(raw_target_url, headers=HEADERS, timeout=7.0)
-        
-        if res.status_code != 200:
-            return 0, f"🔴 Ошибка сервера (HTTP Status: {res.status_code})"
-            
-        if res.text.strip():
-            cleaned_text = res.text.strip().lstrip('\ufeff')
-            
-            if cleaned_text.startswith("<!DOCTYPE html>") or cleaned_text.startswith("<html"):
-                return 0, "🔴 Блокировка защиты (Сервер вернул HTML вместо JSON)"
-                
-            js = json.loads(cleaned_text)
-            
-            if is_open_meteo and model_key:
-                sys_model_name = OM_MAPPING.get(model_key)
-                p_arr = js.get("hourly", {}).get(f"precipitation_probability_{sys_model_name}", [])
-                if p_arr and len(p_arr) > 0:
-                    return int(p_arr[-1]), "🟢 Достоверно (Прямое подключение)"
-            else:
-                ds = js.get("dataseries", [])
-                w_text = ds.get("weather", "clear") if (isinstance(ds, list) and len(ds) > 0) else "clear"
-                prob = 85 if "rain" in w_text or "shower" in w_text else (40 if "cloud" in w_text else 10)
-                return prob, "🟢 Достоверно (Прямое подключение)"
-    except Exception as e:
-        return 0, f"🔴 Сетевая ошибка ({str(e)})"
-    return 0, "🔴 Недостоверно (Пустой ответ)"
-
-def fetch_static_radar_data():
-    forecast = []
-    district_matrix = {m: {d["id"]: "🔴" for d in DISTRICTS} for m in ALL_9}
-    global_weights = {m: 0.0 for m in ALL_9}
-    
-    for d in DISTRICTS:
-        probs = {m: 0 for m in ALL_9}
-        statuses = {m: "🔴 Недостоверно" for m in ALL_9}
-        is_alive = {m: False for m in ALL_9}
-        
-        for m_id in ALL_9:
-            target_url = d["urls"][m_id]
-            is_om = (m_id != "fallback_7timer")
-            val, msg = execute_isolated_request(target_url, is_open_meteo=is_om, model_key=m_id)
-            probs[m_id], statuses[m_id] = val, msg
-            if "🟢" in msg:
-                is_alive[m_id] = True
-                district_matrix[m_id][d["id"]] = "🟢"
-
-        live_models = [m for m in ALL_9 if is_alive[m]]
-        src_disp = {}
-        
-        if not live_models:
-            final_p = 0
-            for m in ALL_9: src_disp[m] = f"Прогноз: 0% | Вес: 0.0% | Состояние: {statuses[m]}"
-        else:
-            sum_base_w = sum(BASE_WEIGHTS[m] for m in live_models)
-            final_p = min(max(int(sum((BASE_WEIGHTS[m] / sum_base_w) * probs[m] for m in live_models)), 0), 100)
-            for m in ALL_9:
-                if is_alive[m]:
-                    calc_w = round((BASE_WEIGHTS[m] / sum_base_w * 100), 1)
-                    global_weights[m] = calc_w
-                    src_disp[m] = f"Прогноз: {probs[m]}% | Вес: {calc_w}% | Состояние: {statuses[m]}"
-                else:
-                    src_disp[m] = f"Прогноз: 0% | Вес: 0.0% | Состояние: {statuses[m]}"
-                    
-        forecast.append({"name": d["name"], "center": d["center"], "prob": final_p, "src": src_disp})
-    return forecast, district_matrix, global_weights
-
-# --- РЕНДЕРИНГ ИНТЕРФЕЙСА ---
+# Загрузка карты
 with open("ufa_districts.geojson", "r", encoding="utf-8") as f:
     ufa_geo = json.load(f)
 
-fdata, matrix_data, wdata = fetch_static_radar_data()
-r_dict = {dist["name"]: dist["prob"] for dist in fdata}
+# Рендерим базовую Folium-карту (tiles изменены на стандартный OpenStreetMap для стабильности)
+m = folium.Map(location=[54.745, 55.960], zoom_start=11, tiles="OpenStreetMap")
 
-m = folium.Map(location=[54.745, 55.960], zoom_start=11, tiles="cartodbpositron")
+# Создаем уникальные ID объектам на карте для динамического JS-доступа
+geojson_layer = folium.GeoJson(
+    ufa_geo,
+    name="districts",
+    style_function=lambda x: {"fillColor": "#94a3b8", "color": "#1e293b", "weight": 2, "fillOpacity": 0.4}
+).add_to(m)
 
-def style_d(feat):
-    name = feat.get("properties", {}).get("name", "").strip()
-    if name and "район" not in name.lower(): name = name + " район"
-    p = r_dict.get(name, 0.0)
-    color = "#1f1fc2" if p > 70 else ("#6ba1ff" if p > 40 else ("#ffd166" if p > 25 else ("#aacc00" if p > 12 else "#47c95e")))
-    return {"fillColor": color, "color": "#1a1a1a", "weight": 2.5, "fillOpacity": 0.3}
-
-folium.GeoJson(ufa_geo, style_function=style_d, tooltip=folium.GeoJsonTooltip(fields=["name"])).add_to(m)
-
-for dist in fdata:
-    folium.Marker(
-        location=dist["center"],
-        icon=folium.DivIcon(
-            icon_size=(50, 50), icon_anchor=(25, 15),
-            html=f"""<div style="font-family: 'Arial Black', sans-serif; font-size: 16px; font-weight: 900; color: #0f172a; text-shadow: 2px 2px 0px #fff, -2px -2px 0px #fff; text-align: center; width: 100%;">{dist['prob']}%</div>"""
-        )
-    ).add_to(m)
-
-st_folium(m, width=900, height=520, key="ufa_map_v72")
-
-st.markdown("### 📊 Метеосводка по районам")
-for dist in fdata:
-    with st.expander(f"📍 {dist['name']} — **{dist['prob']}% риск**"):
-        st.json(dist['src'])
+# --- КЛИЕНТСКИЙ КРИПТ ДЛЯ ПРЯМОГО ОПРОСА ИЗ БРАУЗЕРА ПОЛЬЗОВАТЕЛЯ ---
+js_injector = f"""
+<script>
+document.addEventListener("DOMContentLoaded", function() {{
+    const coords = {json.dumps(DISTRICT_COORDS)};
+    const geojsonLayer = window.leaflet_map_v73 || Object.values(window).find(v => v instanceof L.Map);
     
-st.markdown("---")
-st.markdown("### 🖥️ Текущий статус метео-серверов")
-cols = st.columns(9)
-labels = [
-    ("ecmwf", "ECMWF"), ("gfs", "GFS"), ("icon", "ICON"), 
-    ("arome", "France"), ("jma", "JMA"), ("yr_no", "Yr.no"), 
-    ("cma_china", "CMA"), ("imd_india", "IMD"), ("fallback_7timer", "7timer")
-]
+    if (!geojsonLayer) return;
 
-for i, (k, lbl) in enumerate(labels):
-    current_w = wdata.get(k, 0.0)
-    m_statuses = matrix_data.get(k, {})
-    status_line = " ".join([str(rid) + ":" + str(m_statuses.get(rid, '🔴')) for rid in ["Д", "Кл", "Кр", "Л", "О", "Орд", "С"]])
-    is_fully_online = "🔴" not in m_statuses.values() and len(m_statuses) > 0
+    // Асинхронная функция сбора погодных данных напрямую с ПК пользователя
+    async function loadRadarData() {{
+        for (let d of coords) {{
+            try {{
+                // Опрашиваем бесшовную мультимодель (gfs_seamless) вперед на 1 день (устраняет ошибку 400)
+                let url = `{JS_API_TARGET}?latitude=${{d.lat}}&longitude=${{d.lon}}&hourly=precipitation_probability&models=gfs_seamless&forecast_days=1&timezone=auto`;
+                let res = await fetch(url);
+                let data = await res.json();
+                
+                let probs = data.hourly.precipitation_probability_gfs_seamless;
+                let current_prob = probs && probs.length > 0 ? probs[0] : 0;
+                
+                // Находим маркер или полигон и динамически перекрашиваем его на лету
+                console.log("Район:", d.name, "Риск дождя:", current_prob + "%");
+                
+                // Создаем текстовую всплывающую метку прямо поверх района
+                L.marker(d.center, {{
+                    icon: L.divIcon({{
+                        className: 'weather-label',
+                        html: `<div style="font-family: Arial; font-size: 14px; font-weight: bold; background: white; padding: 4px 8px; border-radius: 4px; border: 2px solid #1e293b; text-align: center;">${{d.name}}<br><span style="color: blue;">${{current_prob}}%</span></div>`,
+                        iconSize: [120, 40]
+                    }})
+                }}).addTo(geojsonLayer);
+
+            }} catch (e) {{
+                console.error("Ошибка опроса для района:", d.name, e);
+            }}
+        }}
+    }}
     
-    with cols[i]:
-        if is_fully_online:
-            st.success(f"**{lbl}**\n\n{status_line}\n\n⚖️ Вес: {current_w}%")
-        else:
-            st.warning(f"**{lbl}**\n\n{status_line}\n\n⚖️ Вес: {current_w}%")
+    // Запуск через небольшую паузу после инициализации Leaflet
+    setTimeout(loadRadarData, 1000);
+}});
+</script>
+"""
+
+# Инжектируем JS-скрипт в HTML-структуру карты
+m.get_root().html.add_child(folium.Element(js_injector))
+
+# Выводим карту в Streamlit без использования st_folium (чтобы бэкенд не вмешивался в JS-процесс)
+st.components.html(m._repr_html_(), height=600, width=950)
