@@ -5,7 +5,11 @@ from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Чистый перезапущенный ансамбль без использования кэша")
+st.subheader("Атомарная сборка сетевых контуров без использования сессий")
+
+# Принудительный сброс залипших глобальных состояний
+if "w9" in st.session_state:
+    del st.session_state["w9"]
 
 DISTRICTS = [
     {"id": "Д", "name": "Дёмский район", "lat": 54.693, "lon": 55.811, "center": [54.685, 55.820]},
@@ -24,12 +28,9 @@ MODELS = {
 }
 ALL_9 = ["ecmwf", "gfs", "icon", "arome", "jma", "yr_no", "cma_china", "imd_india", "fallback_7timer"]
 HEADERS = {"User-Agent": "Mozilla/5.0"}
+STATIC_W = {m: 1.0 / len(ALL_9) for m in ALL_9}
 
-if "w9" not in st.session_state:
-    st.session_state.w9 = {m: 1.0 / len(ALL_9) for m in ALL_9}
-w = st.session_state.w9
-
-def fetch_clean_radar_data(weights):
+def fetch_atomic_radar_data(weights):
     forecast, audit = [], {m: 0 for m in ALL_9}
     global_weights = {m: 0.0 for m in ALL_9}
     district_matrix = {m: {d["id"]: "🔴" for d in DISTRICTS} for m in ALL_9}
@@ -39,30 +40,34 @@ def fetch_clean_radar_data(weights):
         is_authentic = {m: False for m in ALL_9}
         err_logs = {m: "ОК" for m in ALL_9}
         
+        # 1. Запрос времени через чистую склейку без базовых переменных
         try:
-            t_url = f"https://open-meteo.com{d['lat']}&longitude={d['lon']}&current=time&timezone=auto"
-            res = requests.get(t_url, headers=HEADERS, timeout=3.0)
+            res = requests.get(
+                "https://open-meteo.com" + str(d['lat']) + "&longitude=" + str(d['lon']) + "&current=time&timezone=auto",
+                headers=HEADERS, timeout=3.0
+            )
             if res.status_code == 200:
                 t_str = res.json().get("current", {}).get("time")
         except Exception as ex:
             err_logs["time_sync"] = str(ex)
 
+        # 2. Запрос европейских моделей через атомарную конкатенацию строк
         for m_id, api_name in MODELS.items():
             try:
-                om_url = f"https://open-meteo.com{d['lat']}&longitude={d['lon']}&hourly=precipitation_probability&models={api_name}&forecast_days=1&timezone=auto"
-                res = requests.get(om_url, headers=HEADERS, timeout=3.5)
+                raw_url = "https://open-meteo.com" + str(d['lat']) + "&longitude=" + str(d['lon']) + "&hourly=precipitation_probability&models=" + str(api_name) + "&forecast_days=1&timezone=auto"
+                res = requests.get(raw_url, headers=HEADERS, timeout=3.5)
                 if res.status_code == 200:
                     h_data = res.json().get("hourly", {})
                     times = h_data.get("time", [])
                     if t_str in times:
                         idx = times.index(t_str)
-                    p_arr = h_data.get(f"precipitation_probability_{api_name}", [])
+                    p_arr = h_data.get("precipitation_probability_" + str(api_name), [])
                     if p_arr:
                         probs[m_id] = int(p_arr[idx])
                         audit[m_id], is_authentic[m_id] = min(len(p_arr), 24), True
                         district_matrix[m_id][d["id"]] = "🟢"
                 else:
-                    raise Exception(f"HTTP {res.status_code}")
+                    raise Exception("HTTP Error " + str(res.status_code))
             except Exception as ex:
                 probs[m_id] = int((d['lat'] * 100 + d['lon'] * 50) % 40)
                 audit[m_id], is_authentic[m_id] = 24, False
@@ -77,9 +82,10 @@ def fetch_clean_radar_data(weights):
             audit["yr_no"], is_authentic["yr_no"] = 24, False
             err_logs["yr_no"] = "База недоступна"
 
+        # 3. Запрос к 7timer через атомарную конкатенацию строк
         try:
-            st7_url = f"https://7timer.info{d['lon']}&lat={d['lat']}&ac=0&unit=metric&output=json"
-            res = requests.get(st7_url, headers=HEADERS, timeout=3.0)
+            raw_st7 = "https://7timer.info" + str(d['lon']) + "&lat=" + str(d['lat']) + "&ac=0&unit=metric&output=json"
+            res = requests.get(raw_st7, headers=HEADERS, timeout=3.0)
             if res.status_code == 200:
                 ds = res.json().get("dataseries", [])
                 if isinstance(ds, list) and len(ds) > 0:
@@ -90,7 +96,7 @@ def fetch_clean_radar_data(weights):
                 audit["fallback_7timer"], is_authentic["fallback_7timer"] = 24, True
                 district_matrix["fallback_7timer"][d["id"]] = "🟢"
             else:
-                raise Exception(f"HTTP {res.status_code}")
+                raise Exception("HTTP Error " + str(res.status_code))
         except Exception as ex:
             probs["fallback_7timer"] = int((d['lat'] * 85 + d['lon'] * 35) % 30)
             audit["fallback_7timer"], is_authentic["fallback_7timer"] = 24, False
@@ -110,7 +116,7 @@ def fetch_clean_radar_data(weights):
             valid = [probs[m] for m in ALL_9 if probs[m] is not None]
             final_p = int(np.median(valid)) if valid else 25
             for m in ALL_9:
-                src_disp[m] = f"Прогноз: {probs[m]}% | Вес: 0.0% | Лог: {err_logs.get(m)}"
+                src_disp[m] = "Прогноз: " + str(probs[m]) + "% | Вес: 0.0% | Лог: " + str(err_logs.get(m))
         else:
             sum_act_w = sum(weights[a] for a in act)
             final_p = min(max(int(sum((weights[m] / sum_act_w) * probs[m] for m in act)), 0), 100)
@@ -118,7 +124,7 @@ def fetch_clean_radar_data(weights):
                 calc_w = round((weights[m] / sum_act_w * 100), 1) if is_authentic[m] else 0.0
                 if is_authentic[m]:
                     global_weights[m] = calc_w
-                src_disp[m] = f"Прогноз: {probs[m]}% | Вес: {calc_w}% | Лог: {err_logs.get(m)}"
+                src_disp[m] = "Прогноз: " + str(probs[m]) + "% | Вес: " + str(calc_w) + "% | Лог: " + str(err_logs.get(m))
             
         forecast.append({"name": d["name"], "center": d["center"], "prob": final_p, "src": src_disp})
         
@@ -127,7 +133,7 @@ def fetch_clean_radar_data(weights):
 with open("ufa_districts.geojson", "r", encoding="utf-8") as f:
     ufa_geo = json.load(f)
 
-fdata, matrix_data, adata, wdata = fetch_clean_radar_data(w)
+fdata, matrix_data, adata, wdata = fetch_atomic_radar_data(STATIC_W)
 r_dict = {dist["name"]: dist["prob"] for dist in fdata}
 
 m = folium.Map(location=[54.745, 55.960], zoom_start=11, tiles="cartodbpositron")
@@ -135,7 +141,7 @@ m = folium.Map(location=[54.745, 55.960], zoom_start=11, tiles="cartodbpositron"
 def style_d(feat):
     name = feat.get("properties", {}).get("name", "").strip()
     if name and "район" not in name.lower():
-        name = f"{name} район"
+        name = name + " район"
     p = r_dict.get(name, 0.0)
     color = "#1f1fc2" if p > 70 else ("#6ba1ff" if p > 40 else ("#ffd166" if p > 25 else ("#aacc00" if p > 12 else "#47c95e")))
     return {"fillColor": color, "color": "#1a1a1a", "weight": 2.5, "fillOpacity": 0.3}
@@ -147,15 +153,15 @@ for dist in fdata:
         location=dist["center"],
         icon=folium.DivIcon(
             icon_size=(50, 50), icon_anchor=(25, 15),
-            html=f"""<div style="font-family: 'Arial Black', sans-serif; font-size: 16px; font-weight: 900; color: #0f172a; text-shadow: 2px 2px 0px #fff, -2px -2px 0px #fff; text-align: center; width: 100%;">{dist['prob']}%</div>"""
+            html="""<div style="font-family: 'Arial Black', sans-serif; font-size: 16px; font-weight: 900; color: #0f172a; text-shadow: 2px 2px 0px #fff, -2px -2px 0px #fff; text-align: center; width: 100%;">""" + str(dist['prob']) + """%</div>"""
         )
     ).add_to(m)
 
-st_folium(m, width=900, height=520, key="ufa_map_v41")
+st_folium(m, width=900, height=520, key="ufa_map_v42")
 
 st.markdown("### 📊 Метеосводка по районам")
 for dist in fdata:
-    with st.expander(f"📍 {dist['name']} — **{dist['prob']}% риск**"):
+    with st.expander("📍 " + str(dist['name']) + " — **" + str(dist['prob']) + "% риск**"):
         st.json(dist['src'])
     
 st.markdown("---")
@@ -170,11 +176,11 @@ labels = [
 for i, (k, lbl) in enumerate(labels):
     current_w = wdata.get(k, 0.0)
     m_statuses = matrix_data.get(k, {})
-    status_line = " ".join([f"{rid}:{m_statuses.get(rid, '🔴')}" for rid in ["Д", "Кл", "Кр", "Л", "О", "Орд", "С"]])
+    status_line = " ".join([str(rid) + ":" + str(m_statuses.get(rid, '🔴')) for rid in ["Д", "Кл", "Кр", "Л", "О", "Орд", "С"]])
     is_fully_online = "🔴" not in m_statuses.values() and len(m_statuses) > 0
     
     with cols[i]:
         if is_fully_online:
-            st.success(f"**{lbl}**\n\n{status_line}\n\n⚖️ Вес: {current_w}%")
+            st.success("**" + str(lbl) + "**\n\n" + str(status_line) + "\n\n⚖️ Вес: " + str(current_w) + "%")
         else:
-            st.error(f"**{lbl}**\n\n{status_line}\n\n⚖️ Вес: {current_w}%")
+            st.error("**" + str(lbl) + "**\n\n" + str(status_line) + "\n\n⚖️ Вес: " + str(current_w) + "%")
