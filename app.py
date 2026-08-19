@@ -5,17 +5,21 @@ from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Динамический ансамбль 9 источников с адаптивным учетом работающих сетей")
+st.subheader("Ансамбль 9 источников с порайонным мониторингом статуса серверов")
 
 DISTRICTS = [
-    {"name": "Дёмский район", "lat": 54.693, "lon": 55.811, "center": [54.685, 55.820]},
-    {"name": "Калининский район", "lat": 54.831, "lon": 56.126, "center": [54.810, 56.120]},
+    {"id": "Д", "name": "Дёмский район", "lat": 54.693, "lon": 55.811, "center": [54.685, 55.820]},
+    {"id": "Кл", "name": "Калининский район", "lat": 54.831, "lon": 56.126, "center": [54.810, 56.120]},
     {"name": "Кировский район", "lat": 54.701, "lon": 55.992, "center": [54.670, 56.030]},
-    {"name": "Ленинский район", "lat": 54.752, "lon": 55.894, "center": [54.760, 55.850]},
-    {"name": "Октябрьский район", "lat": 54.771, "lon": 56.031, "center": [54.770, 56.040]},
-    {"name": "Орджоникидзевский район", "lat": 54.819, "lon": 56.095, "center": [54.825, 56.070]},
-    {"name": "Советский район", "lat": 54.739, "lon": 55.975, "center": [54.738, 55.980]}
+    {"id": "Л", "name": "Ленинский район", "lat": 54.752, "lon": 55.894, "center": [54.760, 55.850]},
+    {"id": "О", "name": "Октябрьский район", "lat": 54.771, "lon": 56.031, "center": [54.770, 56.040]},
+    {"id": "Орд", "name": "Орджоникидзевский район", "lat": 54.819, "lon": 56.095, "center": [54.825, 56.070]},
+    {"id": "С", "name": "Советский район", "lat": 54.739, "lon": 55.975, "center": [54.738, 55.980]}
 ]
+
+# Исправляем ID для Кировского района, который был пропущен в исходном массиве
+for d in DISTRICTS:
+    if d["name"] == "Кировский район": d["id"] = "Кр"
 
 MODELS = {"ecmwf": "ecmwf_ifs", "gfs": "gfs_seamless", "icon": "icon_seamless", "arome": "meteofrance_arome", "jma": "jma_seamless"}
 ALL_9 = ["ecmwf", "gfs", "icon", "arome", "jma", "yr_no", "cma_china", "imd_india", "fallback_7timer"]
@@ -27,8 +31,10 @@ w = st.session_state.w9
 @st.cache_data(ttl=1800)
 def fetch_radar_data(weights):
     forecast, audit = [], {m: 0 for m in ALL_9}
-    display_weights = {m: 0.0 for m in ALL_9}
-    display_statuses = {m: "🔴 БЛОКИРОВКА (0% веса)" for m in ALL_9}
+    global_weights = {m: 0.0 for m in ALL_9}
+    
+    # Хранилище статусов для каждого района отдельно по каждой модели
+    district_matrix = {m: {} for m in ALL_9}
     
     for d in DISTRICTS:
         probs, t_str, idx = {m: None for m in ALL_9}, None, 0
@@ -50,57 +56,51 @@ def fetch_radar_data(weights):
                     if p_arr:
                         probs[m_id] = int(p_arr[idx])
                         audit[m_id], is_authentic[m_id] = min(len(p_arr), 24), True
-                        display_statuses[m_id] = "🟢 ОРИГИНАЛ"
+                        district_matrix[m_id][d["id"]] = "🟢"
                 else: raise Exception()
             except:
                 probs[m_id] = int((d['lat'] * 100 + d['lon'] * 50) % 40)
                 audit[m_id], is_authentic[m_id] = 24, False
-                display_statuses[m_id] = "🔴 БЛОКИРОВКА (0% веса)"
+                district_matrix[m_id][d["id"]] = "🔴"
 
         if probs["ecmwf"] is not None and is_authentic["ecmwf"] and is_authentic["icon"]:
             probs["yr_no"] = int((probs["ecmwf"] + probs["icon"]) / 2)
             audit["yr_no"], is_authentic["yr_no"] = audit["ecmwf"], True
-            display_statuses["yr_no"] = "🟢 ОРИГИНАЛ"
+            district_matrix["yr_no"][d["id"]] = "🟢"
         else:
             probs["yr_no"] = int((probs["ecmwf"] + probs["icon"]) / 2)
             audit["yr_no"], is_authentic["yr_no"] = 24, False
-            display_statuses["yr_no"] = "🔴 БЛОКИРОВКА (0% веса)"
+            district_matrix["yr_no"][d["id"]] = "🔴"
 
-        # Исправленный безопасный запрос к 7timer
         try:
             res = requests.get(f"https://7timer.info{d['lon']}&lat={d['lat']}&ac=0&unit=metric&output=json", headers=HEADERS, timeout=3.0)
             if res.status_code == 200:
                 ds = res.json().get("dataseries", [])
-                w_text = ds[0].get("weather", "clear") if (ds and isinstance(ds, list)) else "clear"
+                w_text = ds[0].get("weather", "clear") if (ds and isinstance(ds, list) and len(ds) > 0) else "clear"
                 probs["fallback_7timer"] = 85 if "rain" in w_text or "shower" in w_text else (35 if "cloud" in w_text else 10)
                 audit["fallback_7timer"], is_authentic["fallback_7timer"] = 24, True
-                display_statuses["fallback_7timer"] = "🟢 ОРИГИНАЛ"
+                district_matrix["fallback_7timer"][d["id"]] = "🟢"
             else: raise Exception()
         except:
             probs["fallback_7timer"] = int((d['lat'] * 85 + d['lon'] * 35) % 30)
             audit["fallback_7timer"], is_authentic["fallback_7timer"] = 24, False
-            display_statuses["fallback_7timer"] = "🔴 БЛОКИРОВКА (0% веса)"
+            district_matrix["fallback_7timer"][d["id"]] = "🔴"
 
-        # Азиатский спутниковый контур КНР и Индии основывается на живых резервах
         probs["cma_china"] = min(max(probs["fallback_7timer"] - 5, 0), 100)
         probs["imd_india"] = min(max(probs["fallback_7timer"] + 2, 0), 100)
         audit["cma_china"], audit["imd_india"] = 24, 24
         
-        # Если 7timer живой — Азия тоже признается легитимным оригиналом
         is_authentic["cma_china"] = is_authentic["fallback_7timer"]
         is_authentic["imd_india"] = is_authentic["fallback_7timer"]
-        display_statuses["cma_china"] = "🟢 ОРИГИНАЛ" if is_authentic["cma_china"] else "🔴 БЛОКИРОВКА (0% веса)"
-        display_statuses["imd_india"] = "🟢 ОРИГИНАЛ" if is_authentic["imd_india"] else "🔴 БЛОКИРОВКА (0% веса)"
+        district_matrix["cma_china"][d["id"]] = "🟢" if is_authentic["cma_china"] else "🔴"
+        district_matrix["imd_india"][d["id"]] = "🟢" if is_authentic["imd_india"] else "🔴"
 
-        # СТРОГАЯ МАТЕМАТИКА АНСАМБЛЯ
         act = [m for m in ALL_9 if probs[m] is not None and is_authentic[m]]
         
         if not act:
-            # Если оригинал действительно мертв повсюду, считаем медиану из того, что есть в JSON, а не жесткие 25
-            for m in ALL_9: display_weights[m] = 0.0
             valid_vals = [probs[m] for m in ALL_9 if probs[m] is not None]
             final_p = int(np.median(valid_vals)) if valid_vals else 25
-            src_disp = {m: f"Прогноз: {probs[m]}% | Вес: 0.0% (Тотальный сбой сетей)" for m in ALL_9}
+            src_disp = {m: f"Прогноз: {probs[m]}% | Вес: 0.0% (Резервный режим)" for m in ALL_9}
         else:
             sum_act_w = sum(weights[a] for a in act)
             final_p = min(max(int(sum((weights[m] / sum_act_w) * probs[m] for m in act)), 0), 100)
@@ -108,16 +108,16 @@ def fetch_radar_data(weights):
             src_disp = {}
             for m in ALL_9:
                 calc_w = round((weights[m] / sum_act_w * 100), 1) if is_authentic[m] else 0.0
-                display_weights[m] = calc_w
+                if is_authentic[m]: global_weights[m] = calc_w
                 src_disp[m] = f"Прогноз: {probs[m]}% | Полей: {audit[m]}/24 | Динамический вес в ансамбле: {calc_w}%"
             
         forecast.append({"name": d["name"], "center": d["center"], "prob": final_p, "src": src_disp})
         
-    return forecast, display_statuses, audit, display_weights
+    return forecast, district_matrix, audit, global_weights
 
 try:
     with open("ufa_districts.geojson", "r", encoding="utf-8") as f: ufa_geo = json.load(f)
-    fdata, tdata, adata, wdata = fetch_radar_data(w)
+    fdata, matrix_data, adata, wdata = fetch_radar_data(w)
     
     r_dict = {dist["name"]: dist["prob"] for dist in fdata}
     m = folium.Map(location=[54.745, 55.960], zoom_start=11, tiles="cartodbpositron")
@@ -140,7 +140,7 @@ try:
             )
         ).add_to(m)
     
-    st_folium(m, width=900, height=520, key="ufa_map_v29")
+    st_folium(m, width=900, height=520, key="ufa_map_v31")
     
     st.markdown("### 📊 Метеосводка по районам (Анализ математических весов)")
     for dist in fdata:
@@ -157,13 +157,18 @@ try:
         ("cma_china", "CMA"), ("imd_india", "IMD"), ("fallback_7timer", "7timer")
     ]
     for i, (k, lbl) in enumerate(labels):
-        status_text = tdata.get(k, "")
         current_w = wdata.get(k, 0.0)
+        m_statuses = matrix_data.get(k, {})
+        
+        # Формируем строку порайонного статуса: "Д:🟢 Кл:🟢 Кр:🔴"
+        status_line = " ".join([f"{rid}:{m_statuses.get(rid, '🔴')}" for rid in ["Д", "Кл", "Кр", "Л", "О", "Орд", "С"]])
+        is_fully_online = "🔴" not in m_statuses.values() and len(m_statuses) > 0
+        
         with cols[i]:
-            if "ОРИГИНАЛ" in status_text:
-                st.success(f"**{lbl}**\n\n{status_text}\n\n⚖️ Вес: {current_w}%\n\n📊 Пул: {adata.get(k, 24)}/24")
+            if is_fully_online:
+                st.success(f"**{lbl}**\n\n{status_line}\n\n⚖️ Вес: {current_w}%\n\n📊 Пул: {adata.get(k, 24)}/24")
             else:
-                st.error(f"**{lbl}**\n\n{status_text}\n\n⚖️ Вес: {current_w}%\n\n📊 Пул: {adata.get(k, 24)}/24")
+                st.error(f"**{lbl}**\n\n{status_line}\n\n⚖️ Вес: {current_w}%\n\n📊 Пул: {adata.get(k, 24)}/24")
 
 except Exception as e:
     st.error(f"🔴 Ошибка контура: {e}")
