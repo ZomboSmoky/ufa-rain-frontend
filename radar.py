@@ -43,7 +43,6 @@ class LeafletWeatherInjector(folium.elements.MacroElement):
         self.coords = coords
         self.api_url = api_url
         self.layer_name = layer_name
-        # Строка ниже НЕ использует f-модификатор, защищая JS-переменные ${} от парсера Python
         self._template = Template("""
             {% macro script(this, kwargs) %}
             (function() {
@@ -119,14 +118,14 @@ class LeafletWeatherInjector(folium.elements.MacroElement):
             {% endmacro %}
         """)
 
-# Активируем макрос инжекции, корректно передавая параметры
+# Активируем макрос инжекции
 LeafletWeatherInjector(DISTRICT_COORDS, JS_API_TARGET, geojson_layer.get_name()).add_to(m)
 
-# Безопасная компиляция всей структуры карты в чистую HTML-строку
-compiled_map_html = m.get_root().render()
+# ИСПРАВЛЕНО: Принудительное приведение скомпилированной разметки карты к строгому текстовому типу str
+raw_html_string = str(m.get_root().render())
 
-# Выводим автономный HTML-компонент
-st.components.html(compiled_map_html, height=550, width=950)
+# Безопасный вывод автономного текстового HTML-компонента
+st.components.html(raw_html_string, height=550, width=950)
 
 # --- СТАТИЧЕСКАЯ ИНФОРМАЦИОННАЯ МЕТЕОСВОДКА ПО РАЙОНАМ ---
 st.markdown("---")
