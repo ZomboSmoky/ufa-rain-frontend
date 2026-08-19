@@ -6,10 +6,14 @@ from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Прямое подключение: Валидные API-домены без использования прокси-серверов")
+st.subheader("Прямое подключение: Динамическая сборка символьного API-домена")
 
-# --- ГЛОБАЛЬНЫЕ СТАТИЧЕСКИЕ API-ЭНДПОИНТЫ ---
-VALID_OPEN_METEO_URL = "https://open-meteo.com"
+# --- ЗАЩИЩЕННЫЙ СИМВОЛЬНЫЙ СБОРЩИК ДОМЕНА (ИСПРАВЛЯЕТ БАГ ОБРЕЗКИ СТРОК) ---
+SUB_PREFIX = "a" + "p" + "i"
+BASE_DOMAIN = "open-meteo.com"
+# Переменная гарантированно соберет валидный эндпоинт во время работы в облаке
+VALID_OPEN_METEO_URL = f"https://{SUB_PREFIX}.{BASE_DOMAIN}/v1/forecast"
+
 SEVENTIMER_API_ENDPOINT = "https://7timer.info"
 
 # Координатная сетка районов Уфы
@@ -30,7 +34,14 @@ OM_MAPPING = {
 }
 ALL_9 = ["ecmwf", "gfs", "icon", "arome", "jma", "yr_no", "cma_china", "imd_india", "fallback_7timer"]
 BASE_WEIGHTS = {m: 1.0 / len(ALL_9) for m in ALL_9}
-HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+
+# Расширенные заголовки реального браузера
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Connection": "keep-alive"
+}
 
 # --- ПРОГРАММНЫЙ СБОРЩИК ПРЯМЫХ ССЫЛОК ---
 DISTRICTS = []
@@ -38,12 +49,8 @@ current_date_str = datetime.now().strftime("%Y-%m-%d")
 
 for d in DISTRICT_COORDS:
     urls_pool = {}
-    
-    # Прямые ссылки на ://open-meteo.com
     for m_id, sys_name in OM_MAPPING.items():
         urls_pool[m_id] = f"{VALID_OPEN_METEO_URL}?latitude={d['lat']}&longitude={d['lon']}&hourly=precipitation_probability&models={sys_name}&start_date={current_date_str}&end_date={current_date_str}&timezone=auto"
-    
-    # Прямая ссылка на родной 7timer
     urls_pool["fallback_7timer"] = f"{SEVENTIMER_API_ENDPOINT}?lon={d['lon']}&lat={d['lat']}&ac={random.randint(1,99)}&unit=metric&output=json"
     
     DISTRICTS.append({
@@ -53,29 +60,33 @@ for d in DISTRICT_COORDS:
 # --- ЧИСТЫЙ СЕТЕВОЙ КОНТУР НАПРЯМУЮ ---
 def execute_isolated_request(raw_target_url, is_open_meteo=True, model_key=None):
     try:
-        time.sleep(0.04) # Минимальная пауза во избежание спам-фильтров серверов
+        time.sleep(0.05)
+        res = requests.get(raw_target_url, headers=HEADERS, timeout=7.0)
         
-        # Запрос выполняется напрямую без посредников
-        res = requests.get(raw_target_url, headers=HEADERS, timeout=6.0)
-        
-        if res.status_code == 200 and res.text.strip():
+        if res.status_code != 200:
+            return 0, f"🔴 Ошибка сервера (HTTP Status: {res.status_code})"
+            
+        if res.text.strip():
             cleaned_text = res.text.strip().lstrip('\ufeff')
+            
+            if cleaned_text.startswith("<!DOCTYPE html>") or cleaned_text.startswith("<html"):
+                return 0, "🔴 Блокировка защиты (Сервер вернул HTML вместо JSON)"
+                
             js = json.loads(cleaned_text)
             
             if is_open_meteo and model_key:
                 sys_model_name = OM_MAPPING.get(model_key)
                 p_arr = js.get("hourly", {}).get(f"precipitation_probability_{sys_model_name}", [])
                 if p_arr and len(p_arr) > 0:
-                    # Извлекаем последнее значение прогноза на сегодня
                     return int(p_arr[-1]), "🟢 Достоверно (Прямое подключение)"
             else:
                 ds = js.get("dataseries", [])
-                w_text = ds[0].get("weather", "clear") if (isinstance(ds, list) and len(ds) > 0) else "clear"
+                w_text = ds.get("weather", "clear") if (isinstance(ds, list) and len(ds) > 0) else "clear"
                 prob = 85 if "rain" in w_text or "shower" in w_text else (40 if "cloud" in w_text else 10)
                 return prob, "🟢 Достоверно (Прямое подключение)"
     except Exception as e:
         return 0, f"🔴 Сетевая ошибка ({str(e)})"
-    return 0, "🔴 Недостоверно (Сервер вернул пустой ответ или ошибку)"
+    return 0, "🔴 Недостоверно (Пустой ответ)"
 
 def fetch_static_radar_data():
     forecast = []
@@ -116,7 +127,7 @@ def fetch_static_radar_data():
         forecast.append({"name": d["name"], "center": d["center"], "prob": final_p, "src": src_disp})
     return forecast, district_matrix, global_weights
 
-# --- РЕНДЕРИНГ ИНТЕРФЕЙСА FOLIUM И STREAMLIT ---
+# --- РЕНДЕРИНГ ИНТЕРФЕЙСА ---
 with open("ufa_districts.geojson", "r", encoding="utf-8") as f:
     ufa_geo = json.load(f)
 
@@ -143,7 +154,7 @@ for dist in fdata:
         )
     ).add_to(m)
 
-st_folium(m, width=900, height=520, key="ufa_map_v70")
+st_folium(m, width=900, height=520, key="ufa_map_v72")
 
 st.markdown("### 📊 Метеосводка по районам")
 for dist in fdata:
