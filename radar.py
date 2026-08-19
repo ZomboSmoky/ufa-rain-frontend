@@ -5,7 +5,7 @@ from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Автономные контуры на распределённых зеркалах Node-Red")
+st.subheader("Модульная архитектура: 9 полностью изолированных сетевых потоков")
 
 DISTRICTS = [
     {"id": "Д", "name": "Дёмский район", "lat": 54.693, "lon": 55.811, "center": [54.685, 55.820]},
@@ -17,114 +17,130 @@ DISTRICTS = [
     {"id": "С", "name": "Советский район", "lat": 54.739, "lon": 55.975, "center": [54.738, 55.980]}
 ]
 
-AUTONOMOUS_MODELS = {
-    "ecmwf": "ecmwf_ifs", "gfs": "gfs_seamless", "icon": "icon_seamless",
-    "arome": "meteofrance_arome", "jma": "jma_seamless", "yr_no": "yr_yr",
-    "cma_china": "cma_graphes", "imd_india": "imd_gfs"
-}
 ALL_9 = ["ecmwf", "gfs", "icon", "arome", "jma", "yr_no", "cma_china", "imd_india", "fallback_7timer"]
-
 BASE_WEIGHTS = {m: 1.0 / len(ALL_9) for m in ALL_9}
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0"
-]
+# --- ИЗОЛИРОВАННЫЕ ФУНКЦИИ ОПРОСА (ОШИБКА В ОДНОЙ НЕ ВЛИЯЕТ НА ДРУГИЕ) ---
 
-def fetch_strict_radar_data(base_weights):
+def call_open_meteo_model(m_id, model_name, lat, lon):
+    """Изолированный сетевой запрос к моделям Open-Meteo через params"""
+    try:
+        time.sleep(0.02)
+        # Базовый URL без знаков вопроса защищает от багов прокси хостинга
+        base_url = "https://open-meteo.com"
+        query_params = {
+            "latitude": float(lat),
+            "longitude": float(lon),
+            "current": "time",
+            "hourly": "precipitation_probability",
+            "models": str(model_name),
+            "forecast_days": 1,
+            "timezone": "auto"
+        }
+        res = requests.get(base_url, params=query_params, headers=HEADERS, timeout=4.0)
+        if res.status_code == 200 and res.text.strip() and not res.text.startswith("<"):
+            js = res.json()
+            t_curr = js.get("current", {}).get("time")
+            h_data = js.get("hourly", {})
+            times = h_data.get("time", [])
+            p_arr = h_data.get(f"precipitation_probability_{model_name}", [])
+            if t_curr in times and p_arr:
+                return int(p_arr[times.index(t_curr)]), "🟢 Достоверно"
+        raise Exception(f"HTTP {res.status_code} или неверный формат ответа")
+    except Exception as ex:
+        return 0, f"🔴 Недостоверно ({str(ex)})"
+
+def call_7timer_network(lat, lon):
+    """Изолированный сетевой запрос к азиатскому ядру 7timer через params"""
+    try:
+        time.sleep(0.02)
+        base_url = "https://7timer.info"
+        query_params = {
+            "lon": float(lon),
+            "lat": float(lat),
+            "ac": 0,
+            "unit": "metric",
+            "output": "json"
+        }
+        res = requests.get(base_url, params=query_params, headers=HEADERS, timeout=4.0)
+        if res.status_code == 200 and res.text.strip() and not res.text.startswith("<"):
+            cleaned = res.text.strip().lstrip('\ufeff')
+            js = json.loads(cleaned)
+            ds = js.get("dataseries", [])
+            w_text = ds[0].get("weather", "clear") if (isinstance(ds, list) and len(ds) > 0) else "clear"
+            prob = 85 if "rain" in w_text or "shower" in w_text else (35 if "cloud" in w_text else 10)
+            return prob, "🟢 Достоверно"
+        raise Exception(f"HTTP {res.status_code}")
+    except Exception as ex:
+        return 0, f"🔴 Недостоверно ({str(ex)})"
+
+# --- ГЛАВНЫЙ КОНТЕНТНЫЙ ДВИЖОК ---
+
+def fetch_modular_radar_data():
     forecast = []
     district_matrix = {m: {d["id"]: "🔴" for d in DISTRICTS} for m in ALL_9}
     global_weights = {m: 0.0 for m in ALL_9}
     
+    # Справочник системных имен моделей для Open-Meteo
+    om_mapping = {
+        "ecmwf": "ecmwf_ifs", "gfs": "gfs_seamless", "icon": "icon_seamless",
+        "arome": "meteofrance_arome", "jma": "jma_seamless", "yr_no": "yr_yr",
+        "cma_china": "cma_graphes", "imd_india": "imd_gfs"
+    }
+
     for d in DISTRICTS:
         probs = {m: 0 for m in ALL_9}
-        is_authentic = {m: False for m in ALL_9}
-        err_logs = {m: "ОК" for m in ALL_9}
+        statuses = {m: "🔴 Недостоверно" for m in ALL_9}
+        is_alive = {m: False for m in ALL_9}
         
-        # --- 1. ОПРОС СЕРВЕРОВ ЧЕРЕЗ ОТКРЫТОЕ ЗЕРКАЛО NODE-RED ---
-        for m_id, api_name in AUTONOMOUS_MODELS.items():
-            time.sleep(0.05)  # Защитный интервал
-            current_headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json"}
-            
-            try:
-                # Прямая сборка строки параметров исключает баги прокси-парсеров Streamlit
-                raw_url = f"https://open-meteo.com{d['lat']}&longitude={d['lon']}&current=time&hourly=precipitation_probability&models={api_name}&forecast_days=1&timezone=auto"
-                
-                res = requests.get(raw_url, headers=current_headers, timeout=4.5)
-                
-                if res.status_code == 200 and res.text.strip() and not res.text.startswith("<"):
-                    res_json = res.json()
-                    t_current = res_json.get("current", {}).get("time")
-                    h_data = res_json.get("hourly", {})
-                    times = h_data.get("time", [])
-                    p_arr = h_data.get(f"precipitation_probability_{api_name}", [])
-                    
-                    if t_current and times and p_arr and (t_current in times):
-                        idx = times.index(t_current)
-                        probs[m_id] = int(p_arr[idx])
-                        is_authentic[m_id] = True
-                        district_matrix[m_id][d["id"]] = "🟢"
-                    else:
-                        raise Exception("Ошибка индексов времени JSON")
-                else:
-                    raise Exception(f"HTTP {res.status_code} или HTML-заглушка")
-            except Exception as ex:
-                probs[m_id] = 0
-                is_authentic[m_id] = False
-                err_logs[m_id] = str(ex)
+        # Поочередно вызываем полностью изолированные функции
+        for m_id, sys_name in om_mapping.items():
+            val, status_msg = call_open_meteo_model(m_id, sys_name, d["lat"], d["lon"])
+            probs[m_id] = val
+            statuses[m_id] = status_msg
+            if "🟢" in status_msg:
+                is_alive[m_id] = True
+                district_matrix[m_id][d["id"]] = "🟢"
 
-        # --- 2. ОПРОС СЕРВЕРА 7TIMER ---
-        try:
-            time.sleep(0.05)
-            current_headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json"}
-            st7_url = f"https://7timer.info{d['lon']}&lat={d['lat']}&ac=0&unit=metric&output=json"
-            
-            res = requests.get(st7_url, headers=current_headers, timeout=4.5)
-            
-            if res.status_code == 200 and res.text.strip() and not res.text.startswith("<"):
-                cleaned_text = res.text.strip().lstrip('\ufeff')
-                data_json = json.loads(cleaned_text)
-                ds = data_json.get("dataseries", [])
-                w_text = ds.get("weather", "clear") if (isinstance(ds, list) and len(ds) > 0) else "clear"
-                probs["fallback_7timer"] = 85 if "rain" in w_text or "shower" in w_text else (35 if "cloud" in w_text else 10)
-                is_authentic["fallback_7timer"] = True
-                district_matrix["fallback_7timer"][d["id"]] = "🟢"
-            else:
-                raise Exception(f"HTTP {res.status_code} или HTML-заглушка")
-        except Exception as ex:
-            probs["fallback_7timer"] = 0
-            is_authentic["fallback_7timer"] = False
-            err_logs["fallback_7timer"] = str(ex)
+        # Отдельный изолированный вызов 7timer
+        val_7t, status_7t = call_7timer_network(d["lat"], d["lon"])
+        probs["fallback_7timer"] = val_7t
+        statuses["fallback_7timer"] = status_7t
+        if "🟢" in status_7t:
+            is_alive["fallback_7timer"] = True
+            district_matrix["fallback_7timer"][d["id"]] = "🟢"
 
-        # --- 3. ДИНАМИЧЕСКИЙ РАСЧЕТ ВЕСОВ АНСАМБЛЯ ---
-        authentic_models = [m for m in ALL_9 if is_authentic[m]]
+        # --- ДИНАМИЧЕСКИЙ РАСЧЕТ ВЕСОВ АНСАМБЛЯ ---
+        live_models = [m for m in ALL_9 if is_alive[m]]
         src_disp = {}
         
-        if not authentic_models:
+        if not live_models:
             final_p = 0
             for m in ALL_9:
-                src_disp[m] = f"Прогноз: 0% | Вес: 0.0% | Состояние: 🔴 Недостоверно ({err_logs.get(m)})"
+                src_disp[m] = f"Прогноз: 0% | Вес: 0.0% | Состояние: {statuses[m]}"
         else:
-            sum_base_w = sum(base_weights[m] for m in authentic_models)
-            final_p = min(max(int(sum((base_weights[m] / sum_base_w) * probs[m] for m in authentic_models)), 0), 100)
+            sum_base_w = sum(BASE_WEIGHTS[m] for m in live_models)
+            final_p = min(max(int(sum((BASE_WEIGHTS[m] / sum_base_w) * probs[m] for m in live_models)), 0), 100)
             
             for m in ALL_9:
-                if is_authentic[m]:
-                    calc_w = round((base_weights[m] / sum_base_w * 100), 1)
+                if is_alive[m]:
+                    calc_w = round((BASE_WEIGHTS[m] / sum_base_w * 100), 1)
                     global_weights[m] = calc_w
-                    src_disp[m] = f"Прогноз: {probs[m]}% | Вес: {calc_w}% | Состояние: 🟢 Достоверно"
+                    src_disp[m] = f"Прогноз: {probs[m]}% | Вес: {calc_w}% | Состояние: {statuses[m]}"
                 else:
-                    src_disp[m] = f"Прогноз: 0% | Вес: 0.0% | Состояние: 🔴 Недостоверно ({err_logs.get(m)})"
-            
+                    src_disp[m] = f"Прогноз: 0% | Вес: 0.0% | Состояние: {statuses[m]}"
+                    
         forecast.append({"name": d["name"], "center": d["center"], "prob": final_p, "src": src_disp})
         
     return forecast, district_matrix, global_weights
 
+# --- РЕНДЕРИНГ ИНТЕРФЕЙСА STREAMLIT ---
+
 with open("ufa_districts.geojson", "r", encoding="utf-8") as f:
     ufa_geo = json.load(f)
 
-fdata, matrix_data, wdata = fetch_strict_radar_data(BASE_WEIGHTS)
+fdata, matrix_data, wdata = fetch_modular_radar_data()
 r_dict = {dist["name"]: dist["prob"] for dist in fdata}
 
 m = folium.Map(location=[54.745, 55.960], zoom_start=11, tiles="cartodbpositron")
@@ -147,11 +163,11 @@ for dist in fdata:
         )
     ).add_to(m)
 
-st_folium(m, width=900, height=520, key="ufa_map_v53")
+st_folium(m, width=900, height=520, key="ufa_map_v54")
 
 st.markdown("### 📊 Метеосводка по районам")
 for dist in fdata:
-    with st.expander(f"📍 {dist['name']} — **{dist['prob']}% risk**"):
+    with st.expander(f"📍 {dist['name']} — **{dist['prob']}% риск**"):
         st.json(dist['src'])
     
 st.markdown("---")
