@@ -1,11 +1,11 @@
 import streamlit as st
-import requests, folium, json
+import requests, folium, json, time
 import numpy as np
 from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Безопасная передача параметров через сетевые словари params")
+st.subheader("Безопасная обработка UTF-8-SIG и защита от Rate Limit")
 
 DISTRICTS = [
     {"id": "Д", "name": "Дёмский район", "lat": 54.693, "lon": 55.811, "center": [54.685, 55.820]},
@@ -23,7 +23,7 @@ MODELS = {
     "jma": "jma_seamless"
 }
 ALL_9 = ["ecmwf", "gfs", "icon", "arome", "jma", "yr_no", "cma_china", "imd_india", "fallback_7timer"]
-HEADERS = {"User-Agent": "Mozilla/5.0"}
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 STATIC_W = {m: 1.0 / len(ALL_9) for m in ALL_9}
 
 def fetch_safe_radar_data(weights):
@@ -36,6 +36,9 @@ def fetch_safe_radar_data(weights):
         is_authentic = {m: False for m in ALL_9}
         err_logs = {m: "ОК" for m in ALL_9}
         
+        # Микро-пауза, чтобы не блокировал сервер Open-Meteo за частые запросы
+        time.sleep(0.2)
+        
         # 1. Запрос текущего времени
         try:
             time_params = {
@@ -43,12 +46,14 @@ def fetch_safe_radar_data(weights):
                 "current": "time", "timezone": "auto"
             }
             res = requests.get("https://open-meteo.com", params=time_params, headers=HEADERS, timeout=4.0)
-            if res.status_code == 200:
+            if res.status_code == 200 and res.text.strip():
                 t_str = res.json().get("current", {}).get("time")
+            else:
+                err_logs["time_sync"] = f"HTTP {res.status_code} или пустой ответ"
         except Exception as ex:
             err_logs["time_sync"] = str(ex)
 
-        # 2. Запрос глобальных моделей Европы и JMA
+        # 2. Запрос глобальных моделей
         for m_id, api_name in MODELS.items():
             try:
                 om_params = {
@@ -57,7 +62,7 @@ def fetch_safe_radar_data(weights):
                     "forecast_days": 1, "timezone": "auto"
                 }
                 res = requests.get("https://open-meteo.com", params=om_params, headers=HEADERS, timeout=4.0)
-                if res.status_code == 200:
+                if res.status_code == 200 and res.text.strip():
                     h_data = res.json().get("hourly", {})
                     times = h_data.get("time", [])
                     if t_str in times:
@@ -68,9 +73,10 @@ def fetch_safe_radar_data(weights):
                         audit[m_id], is_authentic[m_id] = min(len(p_arr), 24), True
                         district_matrix[m_id][d["id"]] = "🟢"
                 else:
-                    raise Exception(f"HTTP Error {res.status_code}")
+                    raise Exception(f"HTTP {res.status_code} или пустой ответ")
             except Exception as ex:
-                probs[m_id] = int((d['lat'] * 100 + d['lon'] * 50) % 40)
+                # Мягкий порайонный фолбек на основе координат, если сработал Rate Limit сервера
+                probs[m_id] = int((d['lat'] * 100 + d['lon'] * 50) % 35)
                 audit[m_id], is_authentic[m_id] = 24, False
                 err_logs[m_id] = str(ex)
 
@@ -84,7 +90,7 @@ def fetch_safe_radar_data(weights):
             audit["yr_no"], is_authentic["yr_no"] = 24, False
             err_logs["yr_no"] = "База недоступна"
 
-        # 3. Запрос к азиатскому ядру 7timer
+        # 3. Запрос к азиатскому ядру 7timer (С лечением UTF-8 BOM маркера)
         try:
             st7_params = {
                 "lon": float(d['lon']), "lat": float(d['lat']),
@@ -92,15 +98,18 @@ def fetch_safe_radar_data(weights):
             }
             res = requests.get("https://7timer.info", params=st7_params, headers=HEADERS, timeout=4.0)
             if res.status_code == 200:
-                ds = res.json().get("dataseries", [])
+                # Жёстко заставляем requests срезать BOM маркер перед чтением json
+                res.encoding = 'utf-8-sig'
+                data_json = json.loads(res.text)
+                ds = data_json.get("dataseries", [])
                 w_text = ds[0].get("weather", "clear") if (isinstance(ds, list) and len(ds) > 0) else "clear"
                 probs["fallback_7timer"] = 85 if "rain" in w_text or "shower" in w_text else (35 if "cloud" in w_text else 10)
                 audit["fallback_7timer"], is_authentic["fallback_7timer"] = 24, True
                 district_matrix["fallback_7timer"][d["id"]] = "🟢"
             else:
-                raise Exception(f"HTTP Error {res.status_code}")
+                raise Exception(f"HTTP {res.status_code}")
         except Exception as ex:
-            probs["fallback_7timer"] = int((d['lat'] * 85 + d['lon'] * 35) % 30)
+            probs["fallback_7timer"] = int((d['lat'] * 85 + d['lon'] * 35) % 25)
             audit["fallback_7timer"], is_authentic["fallback_7timer"] = 24, False
             err_logs["fallback_7timer"] = str(ex)
 
@@ -160,7 +169,7 @@ for dist in fdata:
         )
     ).add_to(m)
 
-st_folium(m, width=900, height=520, key="ufa_map_v44")
+st_folium(m, width=900, height=520, key="ufa_map_v45")
 
 st.markdown("### 📊 Метеосводка по районам")
 for dist in fdata:
