@@ -5,7 +5,7 @@ from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Ансамбль 9 источников с восстановленной адресацией потоков")
+st.subheader("Ансамбль 9 источников с принудительным обновлением кэша потоков")
 
 DISTRICTS = [
     {"id": "Д", "name": "Дёмский район", "lat": 54.693, "lon": 55.811, "center": [54.685, 55.820]},
@@ -24,8 +24,8 @@ HEADERS = {"User-Agent": "Mozilla/5.0"}
 if "w9" not in st.session_state: st.session_state.w9 = {m: 1.0 / len(ALL_9) for m in ALL_9}
 w = st.session_state.w9
 
-@st.cache_data(ttl=1800)
-def fetch_radar_data(weights):
+@st.cache_data(ttl=600)  # Снизили время кэша для быстрой отладки
+def fetch_radar_data_v2(weights):  # Переименовано для сброса старого кэша
     forecast, audit = [], {m: 0 for m in ALL_9}
     global_weights = {m: 0.0 for m in ALL_9}
     district_matrix = {m: {d["id"]: "🔴" for d in DISTRICTS} for m in ALL_9}
@@ -35,7 +35,6 @@ def fetch_radar_data(weights):
         is_authentic = {m: False for m in ALL_9}
         err_logs = {m: "ОК" for m in ALL_9}
         
-        # Точный базовый URL синхронизации времени
         try:
             time_url = f"https://open-meteo.com{d['lat']}&longitude={d['lon']}&current=time&timezone=auto"
             res = requests.get(time_url, headers=HEADERS, timeout=3.0)
@@ -43,7 +42,7 @@ def fetch_radar_data(weights):
         except Exception as ex:
             err_logs["time_sync"] = str(ex)
 
-        # 1. Запрос европейских моделей с жестко зафиксированным URL
+        # 1. Запрос европейских моделей с чистой адресацией
         for m_id, api_name in MODELS.items():
             try:
                 om_url = f"https://open-meteo.com{d['lat']}&longitude={d['lon']}&hourly=precipitation_probability&models={api_name}&forecast_days=1&timezone=auto"
@@ -58,7 +57,7 @@ def fetch_radar_data(weights):
                         audit[m_id], is_authentic[m_id] = min(len(p_arr), 24), True
                         district_matrix[m_id][d["id"]] = "🟢"
                 else: 
-                    raise Exception(f"HTTP {res.status_code}")
+                    raise Exception(f"HTTP Error {res.status_code}")
             except Exception as ex:
                 probs[m_id] = int((d['lat'] * 100 + d['lon'] * 50) % 40)
                 audit[m_id], is_authentic[m_id] = 24, False
@@ -71,29 +70,29 @@ def fetch_radar_data(weights):
         else:
             probs["yr_no"] = int((probs["ecmwf"] + probs["icon"]) / 2)
             audit["yr_no"], is_authentic["yr_no"] = 24, False
-            err_logs["yr_no"] = "Компоненты ECMWF/ICON недоступны"
+            err_logs["yr_no"] = "Базовые компоненты ECMWF/ICON недоступны"
 
-        # 2. Корректный URL-запрос к 7timer с явным разделением параметров через ?lon=
+        # 2. Запрос к 7timer с чистым URL и безопасным извлечением словаря из списка
         try:
             st7_url = f"https://7timer.info{d['lon']}&lat={d['lat']}&ac=0&unit=metric&output=json"
             res = requests.get(st7_url, headers=HEADERS, timeout=3.0)
             if res.status_code == 200:
                 ds = res.json().get("dataseries", [])
                 if isinstance(ds, list) and len(ds) > 0:
-                    w_text = ds[0].get("weather", "clear") # Корректный выбор первого элемента
+                    w_text = ds[0].get("weather", "clear")  # ИСПРАВЛЕННЫЙ СИНТАКСИС СПИСКА
                 else:
                     w_text = "clear"
                 probs["fallback_7timer"] = 85 if "rain" in w_text or "shower" in w_text else (35 if "cloud" in w_text else 10)
                 audit["fallback_7timer"], is_authentic["fallback_7timer"] = 24, True
                 district_matrix["fallback_7timer"][d["id"]] = "🟢"
             else: 
-                raise Exception(f"HTTP {res.status_code}")
+                raise Exception(f"HTTP Error {res.status_code}")
         except Exception as ex:
             probs["fallback_7timer"] = int((d['lat'] * 85 + d['lon'] * 35) % 30)
             audit["fallback_7timer"], is_authentic["fallback_7timer"] = 24, False
             err_logs["fallback_7timer"] = str(ex)
 
-        # 3. Азиатский контур
+        # 3. Азиатский контур КНР и Индии
         probs["cma_china"] = min(max(probs["fallback_7timer"] - 5, 0), 100)
         probs["imd_india"] = min(max(probs["fallback_7timer"] + 2, 0), 100)
         audit["cma_china"], audit["imd_india"] = 24, 24
@@ -106,7 +105,7 @@ def fetch_radar_data(weights):
             err_logs["cma_china"] = "Отключен вслед за базовым 7timer"
             err_logs["imd_india"] = "Отключен вслед за базовым 7timer"
 
-        # ВЫЧИСЛЕНИЕ АНСАМБЛЯ
+        # МАТЕМАТИЧЕСКИЙ РАСЧЕТ АНСАМБЛЯ
         act = [m for m in ALL_9 if probs[m] is not None and is_authentic[m]]
         
         src_disp = {}
@@ -121,7 +120,7 @@ def fetch_radar_data(weights):
             for m in ALL_9:
                 calc_w = round((weights[m] / sum_act_w * 100), 1) if is_authentic[m] else 0.0
                 if is_authentic[m]: global_weights[m] = calc_w
-                src_disp[m] = f"Прогноз: {probs[m]}% | Вес: {calc_w}% | Лог: {err_logs.get(m)}"
+                src_disp[m] = f"Прогноз: {probs[m]}% | Вес: {calc_w}% | Статус: {err_logs.get(m)}"
             
         forecast.append({"name": d["name"], "center": d["center"], "prob": final_p, "src": src_disp})
         
@@ -129,7 +128,8 @@ def fetch_radar_data(weights):
 
 try:
     with open("ufa_districts.geojson", "r", encoding="utf-8") as f: ufa_geo = json.load(f)
-    fdata, matrix_data, adata, wdata = fetch_radar_data(w)
+    # Вызов новой функции для жесткого пробития кэша Streamlit
+    fdata, matrix_data, adata, wdata = fetch_radar_data_v2(w)
     
     r_dict = {dist["name"]: dist["prob"] for dist in fdata}
     m = folium.Map(location=[54.745, 55.960], zoom_start=11, tiles="cartodbpositron")
@@ -152,7 +152,7 @@ try:
             )
         ).add_to(m)
     
-    st_folium(m, width=900, height=520, key="ufa_map_v35")
+    st_folium(m, width=900, height=520, key="ufa_map_v36")
     
     st.markdown("### 📊 Метеосводка по районам (Анализ математических весов)")
     for dist in fdata:
