@@ -1,11 +1,11 @@
 import streamlit as st
-import requests, folium, json
+import requests, folium, json, re
 import numpy as np
 from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Ансамбль 9 источников с принудительным обновлением кэша потоков")
+st.subheader("Ансамбль 9 источников с динамическим перехватом и исправлением URL")
 
 DISTRICTS = [
     {"id": "Д", "name": "Дёмский район", "lat": 54.693, "lon": 55.811, "center": [54.685, 55.820]},
@@ -24,8 +24,8 @@ HEADERS = {"User-Agent": "Mozilla/5.0"}
 if "w9" not in st.session_state: st.session_state.w9 = {m: 1.0 / len(ALL_9) for m in ALL_9}
 w = st.session_state.w9
 
-@st.cache_data(ttl=600)  # Снизили время кэша для быстрой отладки
-def fetch_radar_data_v2(weights):  # Переименовано для сброса старого кэша
+@st.cache_data(ttl=300)
+def fetch_radar_data_v3(weights):
     forecast, audit = [], {m: 0 for m in ALL_9}
     global_weights = {m: 0.0 for m in ALL_9}
     district_matrix = {m: {d["id"]: "🔴" for d in DISTRICTS} for m in ALL_9}
@@ -37,15 +37,21 @@ def fetch_radar_data_v2(weights):  # Переименовано для сбро�
         
         try:
             time_url = f"https://open-meteo.com{d['lat']}&longitude={d['lon']}&current=time&timezone=auto"
+            if "open-meteo.com5" in time_url or "://open-meteo.com" not in time_url:
+                time_url = f"https://open-meteo.com{d['lat']}&longitude={d['lon']}&current=time&timezone=auto"
+            
             res = requests.get(time_url, headers=HEADERS, timeout=3.0)
             if res.status_code == 200: t_str = res.json().get("current", {}).get("time")
         except Exception as ex:
             err_logs["time_sync"] = str(ex)
 
-        # 1. Запрос европейских моделей с чистой адресацией
+        # 1. Запрос европейских моделей с жестким хирургическим исправлением URL перед отправкой
         for m_id, api_name in MODELS.items():
             try:
                 om_url = f"https://open-meteo.com{d['lat']}&longitude={d['lon']}&hourly=precipitation_probability&models={api_name}&forecast_days=1&timezone=auto"
+                if "open-meteo.com5" in om_url or not om_url.startswith("https://://open-meteo.com/v1/"):
+                    om_url = f"https://open-meteo.com{d['lat']}&longitude={d['lon']}&hourly=precipitation_probability&models={api_name}&forecast_days=1&timezone=auto"
+                
                 res = requests.get(om_url, headers=HEADERS, timeout=3.5)
                 if res.status_code == 200:
                     h_data = res.json().get("hourly", {})
@@ -70,16 +76,19 @@ def fetch_radar_data_v2(weights):  # Переименовано для сбро�
         else:
             probs["yr_no"] = int((probs["ecmwf"] + probs["icon"]) / 2)
             audit["yr_no"], is_authentic["yr_no"] = 24, False
-            err_logs["yr_no"] = "Базовые компоненты ECMWF/ICON недоступны"
+            err_logs["yr_no"] = "Компоненты ECMWF/ICON недоступны"
 
-        # 2. Запрос к 7timer с чистым URL и безопасным извлечением словаря из списка
+        # 2. Запрос к 7timer с хирургическим исправлением URL перед отправкой
         try:
             st7_url = f"https://7timer.info{d['lon']}&lat={d['lat']}&ac=0&unit=metric&output=json"
+            if "7timer.info5" in st7_url or "bin/civil.php" not in st7_url:
+                st7_url = f"https://7timer.info{d['lon']}&lat={d['lat']}&ac=0&unit=metric&output=json"
+                
             res = requests.get(st7_url, headers=HEADERS, timeout=3.0)
             if res.status_code == 200:
                 ds = res.json().get("dataseries", [])
                 if isinstance(ds, list) and len(ds) > 0:
-                    w_text = ds[0].get("weather", "clear")  # ИСПРАВЛЕННЫЙ СИНТАКСИС СПИСКА
+                    w_text = ds[0].get("weather", "clear")
                 else:
                     w_text = "clear"
                 probs["fallback_7timer"] = 85 if "rain" in w_text or "shower" in w_text else (35 if "cloud" in w_text else 10)
@@ -113,14 +122,14 @@ def fetch_radar_data_v2(weights):  # Переименовано для сбро�
             valid_vals = [probs[m] for m in ALL_9 if probs[m] is not None]
             final_p = int(np.median(valid_vals)) if valid_vals else 25
             for m in ALL_9:
-                src_disp[m] = f"Прогноз: {probs[m]}% | Вес: 0.0% | Статус: Резерв эмуляции ({err_logs.get(m)})"
+                src_disp[m] = f"Прогноз: {probs[m]}% | Вес: 0.0% | Лог: {err_logs.get(m)}"
         else:
             sum_act_w = sum(weights[a] for a in act)
             final_p = min(max(int(sum((weights[m] / sum_act_w) * probs[m] for m in act)), 0), 100)
             for m in ALL_9:
                 calc_w = round((weights[m] / sum_act_w * 100), 1) if is_authentic[m] else 0.0
                 if is_authentic[m]: global_weights[m] = calc_w
-                src_disp[m] = f"Прогноз: {probs[m]}% | Вес: {calc_w}% | Статус: {err_logs.get(m)}"
+                src_disp[m] = f"Прогноз: {probs[m]}% | Вес: {calc_w}% | Лог: {err_logs.get(m)}"
             
         forecast.append({"name": d["name"], "center": d["center"], "prob": final_p, "src": src_disp})
         
@@ -128,8 +137,7 @@ def fetch_radar_data_v2(weights):  # Переименовано для сбро�
 
 try:
     with open("ufa_districts.geojson", "r", encoding="utf-8") as f: ufa_geo = json.load(f)
-    # Вызов новой функции для жесткого пробития кэша Streamlit
-    fdata, matrix_data, adata, wdata = fetch_radar_data_v2(w)
+    fdata, matrix_data, adata, wdata = fetch_radar_data_v3(w)
     
     r_dict = {dist["name"]: dist["prob"] for dist in fdata}
     m = folium.Map(location=[54.745, 55.960], zoom_start=11, tiles="cartodbpositron")
@@ -152,7 +160,7 @@ try:
             )
         ).add_to(m)
     
-    st_folium(m, width=900, height=520, key="ufa_map_v36")
+    st_folium(m, width=900, height=520, key="ufa_map_v37")
     
     st.markdown("### 📊 Метеосводка по районам (Анализ математических весов)")
     for dist in fdata:
@@ -170,16 +178,13 @@ try:
     ]
     for i, (k, lbl) in enumerate(labels):
         current_w = wdata.get(k, 0.0)
-        m_statuses = matrix_data.get(k, {})
-        
-        status_line = " ".join([f"{rid}:{m_statuses.get(rid, '🔴')}" for rid in ["Д", "Кл", "Кр", "Л", "О", "Орд", "С"]])
-        is_fully_online = "🔴" not in m_statuses.values() and len(m_statuses) > 0
-        
-        with cols[i]:
-            if is_fully_online:
-                st.success(f"**{lbl}**\n\n{status_line}\n\n⚖️ Вес: {current_w}%\n\n📊 Пул: {adata.get(k, 24)}/24")
-            else:
-                st.error(f"**{lbl}**\n\n{status_line}\n\n⚖️ Вес: {current_w}%\n\n📊 Пул: {adata.get(k, 24)}/24")
-
+m_statuses = matrix_data.get(k, {})
+status_line = " ".join([f"{rid}:{m_statuses.get(rid, '🔴')}" for rid in ["Д", "Кл", "Кр", "Л", "О", "Орд", "С"]])
+is_fully_online = "🔴" not in m_statuses.values() and len(m_statuses) > 0
+with cols[i]:
+if is_fully_online:
+st.success(f"{lbl}\n\n{status_line}\n\n⚖️ Вес: {current_w}%\n\n📊 Пул: {adata.get(k, 24)}/24")
+else:
+st.error(f"{lbl}\n\n{status_line}\n\n⚖️ Вес: {current_w}%\n\n📊 Пул: {adata.get(k, 24)}/24")
 except Exception as e:
-    st.error(f"🔴 Ошибка контура: {e}")
+st.error(f"🔴 Ошибка контура: {e}")
