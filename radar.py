@@ -1,5 +1,5 @@
 import streamlit as st
-import folium, json
+import folium, json, io
 from jinja2 import Template
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
@@ -50,7 +50,7 @@ class LeafletWeatherInjector(folium.elements.MacroElement):
                 console.warn = function() {};
                 console.error = (function(orig) {
                     return function(...args) {
-                        if (args && args[0] && typeof args[0] === 'string' && args[0].includes('bufferedData')) return;
+                        if (args && args && typeof args === 'string' && args.includes('bufferedData')) return;
                         orig.apply(console, args);
                     };
                 })(console.error);
@@ -121,8 +121,10 @@ class LeafletWeatherInjector(folium.elements.MacroElement):
 # Активируем макрос инжекции
 LeafletWeatherInjector(DISTRICT_COORDS, JS_API_TARGET, geojson_layer.get_name()).add_to(m)
 
-# ИСПРАВЛЕНО: Принудительное приведение скомпилированной разметки карты к строгому текстовому типу str
-raw_html_string = str(m.get_root().render())
+# ГАРАНТИРОВАННОЕ ПРЕВРАЩЕНИЕ В СТРОКУ: рендерим карту в изолированный текстовый буфер памяти io
+map_buffer = io.StringIO()
+m.save(map_buffer, close_buffer=False)
+raw_html_string = map_buffer.getvalue()
 
 # Безопасный вывод автономного текстового HTML-компонента
 st.components.html(raw_html_string, height=550, width=950)
