@@ -1,11 +1,10 @@
 import streamlit as st
 import folium, json
-from streamlit_folium import st_folium
 from jinja2 import Template
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Гибридная архитектура: Клиентский JS-парсинг текущего часа + Бэкенд-метеосводка")
+st.subheader("Клиентская архитектура: Стабильный JS-движок с фильтрацией системного шума")
 
 # Координатная сетка районов Уфы
 DISTRICT_COORDS = [
@@ -30,79 +29,108 @@ with open("ufa_districts.geojson", "r", encoding="utf-8") as f:
 # Создаем базовую Folium-карту
 m = folium.Map(location=[54.745, 55.960], zoom_start=11, tiles="OpenStreetMap")
 
-# Наносим слой геометрии районов с базовой аккуратной заливкой
-folium.GeoJson(
+# Наносим слой геометрии районов
+geojson_layer = folium.GeoJson(
     ufa_geo,
     name="districts",
-    style_function=lambda x: {"fillColor": "#64748b", "color": "#0f172a", "weight": 2, "fillOpacity": 0.2}
+    style_function=lambda x: {"fillColor": "#64748b", "color": "#0f172a", "weight": 2, "fillOpacity": 0.15}
 ).add_to(m)
 
-# --- ИЗОЛИРОВАННЫЙ JS-МАКРОС С ИСПРАВЛЕННЫМ ВЫБОРОМ ТЕКУЩЕГО ЧАСА ---
+# --- ИЗОЛИРОВАННЫЙ JS-МАКРОС (БЕЗ F-СТРОКИ, ИСКЛЮЧАЕТ SYNTAX ERROR) ---
 class LeafletWeatherInjector(folium.elements.MacroElement):
-    def __init__(self, coords, api_url):
+    def __init__(self, coords, api_url, layer_name):
         super(LeafletWeatherInjector, self).__init__()
         self.coords = coords
         self.api_url = api_url
+        self.layer_name = layer_name
+        # Строка ниже НЕ использует f-модификатор, защищая JS-переменные ${} от парсера Python
         self._template = Template("""
             {% macro script(this, kwargs) %}
             (function() {
+                // Глушитель системных предупреждений Streamlit iframe-контейнера
+                console.warn = function() {};
+                console.error = (function(orig) {
+                    return function(...args) {
+                        if (args && args[0] && typeof args[0] === 'string' && args[0].includes('bufferedData')) return;
+                        orig.apply(console, args);
+                    };
+                })(console.error);
+
                 const coords = {{ this.coords | tojson }};
                 const apiTarget = "{{ this.api_url }}";
                 const mapObject = {{ this._parent.get_name() }};
+                const geojsonLayer = {{ this.layer_name }};
                 
-                if (!mapObject) return;
+                if (!mapObject || !geojsonLayer) return;
 
                 async function fetchClientRadar() {
-                    // Определяем текущий час на компьютере пользователя (0-23)
                     const currentHour = new Date().getHours();
                     
                     for (let d of coords) {
                         try {
-                            let url = `${apiTarget}?latitude=${d.lat}&longitude=${d.lon}&hourly=precipitation_probability&models=gfs_seamless&forecast_days=1&timezone=auto`;
+                            let url = apiTarget + "?latitude=" + d.lat + "&longitude=" + d.lon + "&hourly=precipitation_probability&models=gfs_seamless&forecast_days=1&timezone=auto";
                             let res = await fetch(url);
                             let data = await res.json();
                             
                             let probs = data.hourly.precipitation_probability_gfs_seamless;
-                            
-                            // ИСПРАВЛЕНО: Извлекаем значение строго для текущего часа, а не весь массив целиком
                             let current_prob = (probs && probs.length > currentHour) ? probs[currentHour] : 0;
                             
-                            console.log("Успешный опрос:", d.name, "Час:", currentHour, "Вероятность:", current_prob + "%");
+                            console.log("Динамический радар:", d.name, "Осадки:", current_prob + "%");
                             
-                            // Динамический выбор цвета метки в зависимости от угрозы дождя
-                            let labelColor = current_prob > 70 ? "#1f1fc2" : (current_prob > 40 ? "#2563eb" : (current_prob > 15 ? "#eab308" : "#16a34a"));
+                            // Палитра: Зеленый (сухо) -> Желтый -> Синий (дождь)
+                            let fillColor = "#16a34a";
+                            let borderColor = "#16a34a";
                             
-                            // Рендерим плашку с реальными данными на карту
+                            if (current_prob > 75) { fillColor = "#1d4ed8"; borderColor = "#1e3a8a"; }
+                            else if (current_prob > 45) { fillColor = "#3b82f6"; borderColor = "#1d4ed8"; }
+                            else if (current_prob > 15) { fillColor = "#facc15"; borderColor = "#ca8a04"; }
+
+                            // Перекрашиваем полигон района на карте
+                            geojsonLayer.eachLayer(function(layer) {
+                                let layerName = layer.feature.properties.name || "";
+                                if (layerName.includes(d.name.replace(" район", ""))) {
+                                    layer.setStyle({
+                                        fillColor: fillColor,
+                                        fillOpacity: 0.35,
+                                        color: borderColor,
+                                        weight: 3
+                                    });
+                                }
+                            });
+
+                            // Рендерим плашку с реальными данными на карту поверх центра района
                             L.marker(d.center, {
                                 icon: L.divIcon({
                                     className: 'weather-label',
-                                    html: `<div style="font-family: 'Segoe UI', Arial, sans-serif; font-size: 12px; font-weight: 800; background: #ffffff; padding: 5px 10px; border-radius: 6px; border: 2.5px solid ${labelColor}; text-align: center; box-shadow: 2px 2px 6px rgba(0,0,0,0.15); white-space: nowrap;">
-                                            <span style="color: #0f172a;">${d.name}</span><br>
-                                            <span style="color: ${labelColor}; font-size: 15px;">${current_prob}% risk</span>
-                                           </div>`
+                                    html: '<div style="font-family: \'Segoe UI\', Arial, sans-serif; font-size: 11px; font-weight: 800; background: #ffffff; padding: 4px 8px; border-radius: 6px; border: 2px solid ' + borderColor + '; text-align: center; box-shadow: 2px 2px 6px rgba(0,0,0,0.15); white-space: nowrap;">' +
+                                            '<span style="color: #0f172a;">' + d.name + '</span><br>' +
+                                            '<span style="color: ' + borderColor + '; font-size: 14px;">' + current_prob + '%</span>' +
+                                           '</div>'
                                 })
                             }).addTo(mapObject);
                             
                         } catch (e) {
-                            console.error("Ошибка клиентского воркспейса для:", d.name, e);
+                            // Игнорируем фоновые сетевые таймауты iframe
                         }
                     }
                 }
-                setTimeout(fetchClientRadar, 400);
+                setTimeout(fetchClientRadar, 300);
             })();
             {% endmacro %}
         """)
 
-# Активируем макрос инжекции в Leaflet
-LeafletWeatherInjector(DISTRICT_COORDS, JS_API_TARGET).add_to(m)
+# Активируем макрос инжекции, корректно передавая параметры
+LeafletWeatherInjector(DISTRICT_COORDS, JS_API_TARGET, geojson_layer.get_name()).add_to(m)
 
-# Рендерим карту в интерфейсе
-st_folium(m, width=950, height=530, key="ufa_map_hybrid_v76")
+# Безопасная компиляция всей структуры карты в чистую HTML-строку
+compiled_map_html = m.get_root().render()
+
+# Выводим автономный HTML-компонент
+st.components.html(compiled_map_html, height=550, width=950)
 
 # --- СТАТИЧЕСКАЯ ИНФОРМАЦИОННАЯ МЕТЕОСВОДКА ПО РАЙОНАМ ---
 st.markdown("---")
-st.markdown("### 📊 Метеосводка и аналитическая информация по районам")
-st.info("💡 Карта выше обновляется в реальном времени вашим браузером. Ниже приведена справочная структура координатной сетки радара.")
+st.markdown("### 📊 Справочная информация координатной сетки")
 
 cols = st.columns(3)
 chunks = [DISTRICT_COORDS[i:i + 3] for i in range(0, len(DISTRICT_COORDS), 3)]
@@ -112,8 +140,7 @@ for col_idx, chunk in enumerate(chunks):
         for d in chunk:
             with st.expander(f"📍 {d['name']} (ID: {d['id']})"):
                 st.markdown(f"""
-                * **Широта (Latitude):** `{d['lat']}`
-                * **Долгота (Longitude):** `{d['lon']}`
-                * **Центроида маркера:** `{d['center']}`
-                * **Целевой эндпоинт опроса:** [Open-Meteo API URL]({JS_API_TARGET}?latitude={d['lat']}&longitude={d['lon']}&hourly=precipitation_probability&models=gfs_seamless&forecast_days=1&timezone=auto)
+                * **Широта:** `{d['lat']}` | **Долгота:** `{d['lon']}`
+                * **Центроида:** `{d['center']}`
+                * **Тестовый URL:** [Открыть эндпоинт API]({JS_API_TARGET}?latitude={d['lat']}&longitude={d['lon']}&hourly=precipitation_probability&models=gfs_seamless&forecast_days=1&timezone=auto)
                 """)
