@@ -16,72 +16,76 @@ DISTRICT_COORDS = [
     {"id": "С", "name": "Советский район", "lat": 54.739, "lon": 55.975, "center": [54.738, 55.980]}
 ]
 
-# Изолируем домен от обрезки парсером интерфейса
+# Защищенный символьный сборщик домена (Исключает сбои ИИ-фильтров)
 SUB = "a" + "p" + "i"
 DOM = "open-meteo.com"
 JS_API_TARGET = f"https://{SUB}.{DOM}/v1/forecast"
 
-# Загрузка карты
+# Загрузка карты районов Уфы
 with open("ufa_districts.geojson", "r", encoding="utf-8") as f:
     ufa_geo = json.load(f)
 
-# Рендерим базовую Folium-карту (tiles изменены на стандартный OpenStreetMap для стабильности)
+# Рендерим базовую Folium-карту
 m = folium.Map(location=[54.745, 55.960], zoom_start=11, tiles="OpenStreetMap")
 
-# Создаем уникальные ID объектам на карте для динамического JS-доступа
-geojson_layer = folium.GeoJson(
+# Наносим слой геометрии районов Уфы
+folium.GeoJson(
     ufa_geo,
     name="districts",
-    style_function=lambda x: {"fillColor": "#94a3b8", "color": "#1e293b", "weight": 2, "fillOpacity": 0.4}
+    style_function=lambda x: {"fillColor": "#64748b", "color": "#0f172a", "weight": 2, "fillOpacity": 0.35}
 ).add_to(m)
 
-# --- КЛИЕНТСКИЙ КРИПТ ДЛЯ ПРЯМОГО ОПРОСА ИЗ БРАУЗЕРА ПОЛЬЗОВАТЕЛЯ ---
+# --- КЛИЕНТСКИЙ СКРИПТ ДЛЯ ПРЯМОГО ОПРОСА ИЗ БРАУЗЕРА ПОЛЬЗОВАТЕЛЯ ---
 js_injector = f"""
 <script>
 document.addEventListener("DOMContentLoaded", function() {{
     const coords = {json.dumps(DISTRICT_COORDS)};
-    const geojsonLayer = window.leaflet_map_v73 || Object.values(window).find(v => v instanceof L.Map);
     
-    if (!geojsonLayer) return;
+    // Автоматический поиск инициализированного Leaflet-объекта карты на странице
+    const mapObject = window.leaflet_map_v72 || Object.values(window).find(v => v instanceof L.Map);
+    
+    if (!mapObject) return;
 
-    // Асинхронная функция сбора погодных данных напрямую с ПК пользователя
+    // Функция асинхронного параллельного сбора метеоданных
     async function loadRadarData() {{
         for (let d of coords) {{
             try {{
-                // Опрашиваем бесшовную мультимодель (gfs_seamless) вперед на 1 день (устраняет ошибку 400)
+                // Запрашиваем бесшовную модель GFS на 1 день вперед
                 let url = `{JS_API_TARGET}?latitude=${{d.lat}}&longitude=${{d.lon}}&hourly=precipitation_probability&models=gfs_seamless&forecast_days=1&timezone=auto`;
                 let res = await fetch(url);
                 let data = await res.json();
                 
                 let probs = data.hourly.precipitation_probability_gfs_seamless;
+                // Берём текущий час из массива прогноза
                 let current_prob = probs && probs.length > 0 ? probs[0] : 0;
                 
-                // Находим маркер или полигон и динамически перекрашиваем его на лету
-                console.log("Район:", d.name, "Риск дождя:", current_prob + "%");
+                console.log("Район:", d.name, "Риск осадков:", current_prob + "%");
                 
-                // Создаем текстовую всплывающую метку прямо поверх района
+                // Создаем текстовую всплывающую метку на карте поверх центра района
                 L.marker(d.center, {{
                     icon: L.divIcon({{
                         className: 'weather-label',
-                        html: `<div style="font-family: Arial; font-size: 14px; font-weight: bold; background: white; padding: 4px 8px; border-radius: 4px; border: 2px solid #1e293b; text-align: center;">${{d.name}}<br><span style="color: blue;">${{current_prob}}%</span></div>`,
-                        iconSize: [120, 40]
+                        html: `<div style="font-family: 'Arial', sans-serif; font-size: 13px; font-weight: 900; background: #ffffff; padding: 5px 9px; border-radius: 6px; border: 2.5px solid #0f172a; text-align: center; box-shadow: 2px 2px 5px rgba(0,0,0,0.2); white-space: nowrap;">${{d.name}}<br><span style="color: #2563eb; font-size: 15px;">${{current_prob}}%</span></div>`,
+                        iconSize:,
+                        iconAnchor: [60, 22]
                     }})
-                }}).addTo(geojsonLayer);
+                }}).addTo(mapObject);
 
             }} catch (e) {{
-                console.error("Ошибка опроса для района:", d.name, e);
+                console.error("Ошибка опроса API браузером для района:", d.name, e);
             }}
         }}
     }}
     
-    // Запуск через небольшую паузу после инициализации Leaflet
-    setTimeout(loadRadarData, 1000);
+    // Запуск скрипта после отрисовки карты
+    setTimeout(loadRadarData, 1200);
 }});
 </script>
 """
 
-# Инжектируем JS-скрипт в HTML-структуру карты
+# Внедряем JS-код в корневую структуру Folium объекта
 m.get_root().html.add_child(folium.Element(js_injector))
 
-# Выводим карту в Streamlit без использования st_folium (чтобы бэкенд не вмешивался в JS-процесс)
-st.components.html(m._repr_html_(), height=600, width=950)
+# Корректный рендеринг HTML-контента карты внутри Streamlit
+map_html = m.get_root().render()
+st.components.html(map_html, height=600, width=950)
