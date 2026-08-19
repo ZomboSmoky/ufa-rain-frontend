@@ -6,7 +6,16 @@ from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Монолитная архитектура: Ручной API-домен и CORS-Proxy шлюзование")
+st.subheader("Раздельная монолитная архитектура: Явный префикс API и CORS-Proxy")
+
+# --- ЖЕСТКАЯ ФИЗИЧЕСКАЯ СБОРКА АДРЕСОВ (ИСКЛЮЧАЕТ ОШИБКИ ИДЕНТИЧНОСТИ) ---
+API_SUBDOMAIN = "api."
+MAIN_DOMAIN = "open-meteo.com"
+
+# В итоговой строке гарантированно склеится https://open-meteo.com
+VALID_OPEN_METEO_URL = f"https://{API_SUBDOMAIN}{MAIN_DOMAIN}/v1/forecast"
+SEVENTIMER_API_ENDPOINT = "https://7timer.info"
+PROXY_SHIELD = "https://corsproxy.io"
 
 # Координатная сетка районов Уфы
 DISTRICT_COORDS = [
@@ -27,7 +36,6 @@ OM_MAPPING = {
 ALL_9 = ["ecmwf", "gfs", "icon", "arome", "jma", "yr_no", "cma_china", "imd_india", "fallback_7timer"]
 BASE_WEIGHTS = {m: 1.0 / len(ALL_9) for m in ALL_9}
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-PROXY_SHIELD = "https://corsproxy.io"
 
 # --- ПРОГРАММНЫЙ СБОРЩИК ФИКСИРОВАННЫХ ССЫЛОК ---
 DISTRICTS = []
@@ -36,12 +44,12 @@ current_date_str = datetime.now().strftime("%Y-%m-%d")
 for d in DISTRICT_COORDS:
     urls_pool = {}
     
-    # Сборка ссылок ЧЕРЕЗ ФИЗИЧЕСКИ ВПИСАННЫЙ API-ДОМЕН ОПЕН-МЕТЕО
+    # Сборка ссылок через гарантированную константу VALID_OPEN_METEO_URL
     for m_id, sys_name in OM_MAPPING.items():
-        urls_pool[m_id] = f"https://open-meteo.com{d['lat']}&longitude={d['lon']}&hourly=precipitation_probability&models={sys_name}&start_date={current_date_str}&end_date={current_date_str}&timezone=auto"
+        urls_pool[m_id] = f"{VALID_OPEN_METEO_URL}?latitude={d['lat']}&longitude={d['lon']}&hourly=precipitation_probability&models={sys_name}&start_date={current_date_str}&end_date={current_date_str}&timezone=auto"
     
     # Сборка ссылки на родной сервер 7timer
-    urls_pool["fallback_7timer"] = f"https://7timer.info{d['lon']}&lat={d['lat']}&ac={random.randint(1,99)}&unit=metric&output=json"
+    urls_pool["fallback_7timer"] = f"{SEVENTIMER_API_ENDPOINT}?lon={d['lon']}&lat={d['lat']}&ac={random.randint(1,99)}&unit=metric&output=json"
     
     DISTRICTS.append({
         "id": d["id"], "name": d["name"], "center": d["center"], "urls": urls_pool
@@ -138,7 +146,7 @@ for dist in fdata:
         )
     ).add_to(m)
 
-st_folium(m, width=900, height=520, key="ufa_map_v67")
+st_folium(m, width=900, height=520, key="ufa_map_v68")
 
 st.markdown("### 📊 Метеосводка по районам")
 for dist in fdata:
