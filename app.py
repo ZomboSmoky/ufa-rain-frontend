@@ -66,13 +66,13 @@ def fetch_radar_data(weights):
             probs["yr_no"] = int((probs["ecmwf"] + probs["icon"]) / 2)
             audit["yr_no"], is_authentic["yr_no"] = 24, False
 
-        # 2. Сбор данных 7timer (БЕЗ ОШИБОК ПАРСИНГА СПИСКА)
+        # 2. Сбор данных 7timer С ИСПРАВЛЕННЫМ ИНДЕКСОМ СПИСКА ds[0]
         try:
             res = requests.get(f"https://7timer.info{d['lon']}&lat={d['lat']}&ac=0&unit=metric&output=json", headers=HEADERS, timeout=3.0)
             if res.status_code == 200:
                 ds = res.json().get("dataseries", [])
                 if isinstance(ds, list) and len(ds) > 0:
-                    w_text = ds[0].get("weather", "clear")  # Чтение из первого элемента списка
+                    w_text = ds[0].get("weather", "clear")  # СТРОГОЕ ИЗВЛЕЧЕНИЕ СЛОВАРЯ ИЗ СПИСКА
                 else:
                     w_text = "clear"
                 probs["fallback_7timer"] = 85 if "rain" in w_text or "shower" in w_text else (35 if "cloud" in w_text else 10)
@@ -139,7 +139,7 @@ try:
             )
         ).add_to(m)
     
-    st_folium(m, width=900, height=520, key="ufa_map_v32")
+    st_folium(m, width=900, height=520, key="ufa_map_v33")
     
     st.markdown("### 📊 Метеосводка по районам (Анализ математических весов)")
     for dist in fdata:
