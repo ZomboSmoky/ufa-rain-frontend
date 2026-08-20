@@ -1,6 +1,8 @@
 import streamlit as st
 import requests, folium, json
 from datetime import datetime
+
+# Фиксируем принудительный импорт для отображения карты в Streamlit
 from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
@@ -28,7 +30,7 @@ BASE_WEIGHTS = {m: 1.0 / len(ALL_MODELS) for m in ALL_MODELS}
 HEADERS = {"User-Agent": "Mozilla/5.0 RadarUfa/1.0", "Accept": "application/json"}
 
 def get_model_url(lat, lon, model_key):
-    """Генерирует индивидуальный URL с учетом специфика каждого метеоядра"""
+    """Генерирует индивидуальный URL с учетом специфики каждого метеоядра"""
     if model_key == "yr_no":
         return f"{VALID_OPEN_METEO_URL}?latitude={lat}&longitude={lon}&hourly=precipitation_probability&models=yr_yr&forecast_days=2"
         
@@ -73,7 +75,7 @@ def build_radar_intelligence():
                 matching_keys = [k for k in hourly_data.keys() if "precipitation" in k]
                 
                 if matching_keys and len(matching_keys) > 0:
-                    # ВЕРИФИЦИРОВАНО: Извлекаем строго текстовую строку через индекс [0] во избежание TypeError
+                    # ГАРАНТИРОВАННО ИСПРАВЛЕНО: Извлекаем строго текстовую строку по индексу 0, а не весь список целиком
                     target_key = matching_keys[0]
                     p_arr = hourly_data.get(target_key, [])
                     
