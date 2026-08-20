@@ -113,14 +113,12 @@ st.markdown(INSTAGRAM_STYLE, unsafe_allow_html=True)
 st.title("📸 WeatherGram Ufa")
 st.caption("Полнофункциональный погодный инстаграм-глянец радара Уфы")
 
-# --- СЕРВЕРНЫЙ ЭНДПОИНТ API ---
-SUB_PREFIX = "a" + "p" + "i"
-BASE_DOMAIN = "open-meteo.com"
+SUB_PREFIX, BASE_DOMAIN = "api", "open-meteo.com"
 VALID_OPEN_METEO_URL = f"https://{SUB_PREFIX}.{BASE_DOMAIN}/v1/forecast"
 
 DISTRICT_COORDS = [
     {"id": "Дем", "name": "Дёмский район", "lat": 54.693, "lon": 55.811, "center": [54.685, 55.820]},
-    {"id": "Кал", "name": "Калининский район", "lat": 54.831, "lon": 56.126, "center": [54.810, 56.120]},
+    {"id": "Kал", "name": "Калининский район", "lat": 54.831, "lon": 56.126, "center": [54.810, 56.120]},
     {"id": "Кир", "name": "Кировский район", "lat": 54.701, "lon": 55.992, "center": [54.670, 56.030]},
     {"id": "Лен", "name": "Ленинский район", "lat": 54.752, "lon": 55.894, "center": [54.760, 55.850]},
     {"id": "Окт", "name": "Октябрьский район", "lat": 54.771, "lon": 56.031, "center": [54.770, 56.040]},
@@ -133,7 +131,6 @@ BASE_WEIGHTS = {m: 1.0 / len(ALL_MODELS) for m in ALL_MODELS}
 HEADERS = {"User-Agent": "Mozilla/5.0 RadarUfa/1.0", "Accept": "application/json"}
 
 def get_model_url(lat, lon, model_key):
-    """Генерирует индивидуальный URL со всеми запрашиваемыми физическими метриками"""
     base = f"{VALID_OPEN_METEO_URL}?latitude={lat}&longitude={lon}&timezone=auto&hourly=temperature_2m,apparent_temperature,weather_code,relative_humidity_2m,surface_pressure,wind_speed_10m,wind_gusts_10m"
     if model_key == "ecmwf": return f"{base},precipitation_probability&models=ecmwf_ifs&forecast_days=1"
     elif model_key == "gfs": return f"{base},precipitation_probability&models=gfs_seamless&forecast_days=1"
@@ -235,18 +232,16 @@ def build_radar_intelligence():
             "press": avg_press, "wind": avg_wind, "gust": max_gust, "src": statuses
         })
     return forecast_results, server_matrix
-
 # --- СБОР И ИНТЕГРАЦИЯ ДАННЫХ ---
 with st.spinner("⚡ Сканирование атмосферных параметров..."):
     fdata, matrix_data = build_radar_intelligence()
 r_dict = {dist["name"]: dist["prob"] for dist in fdata}
 
-# 🎨 1. ИСПРАВЛЕННЫЙ МОНОЛИТНЫЙ РЕНДЕРИНГ STORIES (СТРОГО ОДНА СТРОКА)
+# 🎨 1. МОНОЛИТНЫЙ РЕНДЕРИНГ STORIES
 stories_elements = []
 for dist in fdata:
     p = dist["prob"]
     p_text = "—" if p is None else f"{p}%"
-    
     code = dist["wmo"]
     if code == 0: emoji = "☀️"
     elif code in (1, 2): emoji = "🌤️"
@@ -257,9 +252,7 @@ for dist in fdata:
     elif code in (71, 73, 75, 77, 85, 86): emoji = "🌨️"
     elif code in (95, 96, 99): emoji = "⛈️"
     else: emoji = "☁️"
-        
     ring_class = "ring-dry" if (p is None or p < 15) else ("ring-warning" if p < 45 else "ring-danger")
-    
     card_html = f"""
     <div class="story-card">
         <div class="story-ring {ring_class}">
@@ -273,9 +266,7 @@ for dist in fdata:
     """
     stories_elements.append(card_html.strip())
 
-# Все элементы склеиваются в единый безопасный div без разрывов
-full_feed_html = f'<div class="stories-feed">{"".join(stories_elements)}</div>'
-st.markdown(full_feed_html, unsafe_allow_html=True)
+st.markdown(f'<div class="stories-feed">{"".join(stories_elements)}</div>', unsafe_allow_html=True)
 st.markdown("<br>", unsafe_allow_html=True)
 
 # --- 2. ОТРИСОВКА ИНТЕРАКТИВНОЙ КАРТЫ FOLIUM ---
@@ -299,9 +290,9 @@ for dist in fdata:
 
 st_folium(m, width=950, height=480, key="ufa_instagram_radar_v2_premium")
 
-# 🎨 3. РЕНДЕРИНГ INSTAGRAM-ПОСТОВ
+# 🎨 3. МОНОЛИТНЫЙ РЕНДЕРИНГ INSTAGRAM-ПОСТОВ
 st.markdown("### 📱 Лента публикаций по районам")
-posts_html = '<div class="insta-grid">'
+posts_elements = []
 for dist in fdata:
     code = dist["wmo"]
     if code == 0: emoji = "☀️"
@@ -313,32 +304,24 @@ for dist in fdata:
     elif code in (71, 73, 75, 77, 85, 86): emoji = "🌨️"
     elif code in (95, 96, 99): emoji = "⛈️"
     else: emoji = "☁️"
-        
     gust_alert = "⚠️ Внимание: сильные порывы ветра!" if dist["gust"] > 11.0 else "Потоки ветра стабильны"
-    
-    posts_html += f"""
+    single_post_html = f"""
     <div class="insta-post">
-        <div class="post-header">
-            <div class="post-avatar">{dist['id'][:2]}</div>
-            <div class="post-username">{dist['name']}</div>
-        </div>
-        <div class="post-image-alt">
-            <div class="post-temp">{dist['temp']}°C</div>
-            <div class="post-feel">Ощущается как {dist['feel']}°C • {emoji}</div>
-        </div>
+        <div class="post-header"><div class="post-avatar">{dist['id'][:2]}</div><div class="post-username">{dist['name']}</div></div>
+        <div class="post-image-alt"><div class="post-temp">{dist['temp']}°C</div><div class="post-feel">Ощущается как {dist['feel']}°C • {emoji}</div></div>
         <div class="post-content">
             <div class="post-likes">❤️ Нравится «Фантастической четверке» и ещё 6 метеорологам</div>
             <div class="post-metrics">
-                <div>💧 <b>Влажность:</b> {dist['hum']}%</div>
-                <div>📊 <b>Давление:</b> {dist['press']} мм рт. ст.</div>
+                <div>💧 <b>Влажность:</b> {dist['hum']}%</div><div>📊 <b>Давление:</b> {dist['press']} мм рт. ст.</div>
                 <div>💨 <b>Ветер:</b> {dist['wind']} м/с (порывы до {dist['gust']} м/с)</div>
                 <div style="font-size: 11px; color: #8e8e8e; margin-top: 6px; font-weight: 600;">{gust_alert}</div>
             </div>
         </div>
     </div>
     """
-posts_html += '</div>'
-st.markdown(posts_html, unsafe_allow_html=True)
+    posts_elements.append(single_post_html.strip())
+
+st.markdown(f'<div class="insta-grid">{"".join(posts_elements)}</div>', unsafe_allow_html=True)
 st.markdown("<br><br>", unsafe_allow_html=True)
 
 # --- 4. HIGHLIGHTS (МАТРИЦА СЕРВЕРОВ) ---
@@ -352,7 +335,7 @@ for i, m_id in enumerate(ALL_MODELS):
             <div style="font-size: 11px; font-weight: 700; color: #8e8e8e; text-transform: uppercase; margin-bottom: 4px;">{m_id}</div>
             <div style="font-size: 15px; font-weight: 800; color: #16a34a; margin-bottom: 4px;">🧬 ONLINE</div>
             <div style="font-size: 11px; color: #262626; letter-spacing: 0.5px;">
-                Дем:{m_statuses.get('Дем','🟢')} Кал:{m_statuses.get('Кал','🟢')} Кир:{m_statuses.get('Кир','🟢')} Лен:{m_statuses.get('Лен','🟢')} Окт:{m_statuses.get('Окт','🟢')} Сов:{m_statuses.get('Сов','🟢')}
+                Дем:{m_statuses.get('Дем','🟢')} Кал:{m_statuses.get('Kал','🟢')} Кир:{m_statuses.get('Кир','🟢')} Лен:{m_statuses.get('Лен','🟢')} Окт:{m_statuses.get('Окт','🟢')} Сов:{m_statuses.get('Сов','🟢')}
             </div>
         </div>
         """, unsafe_allow_html=True)
