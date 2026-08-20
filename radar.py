@@ -73,7 +73,7 @@ def build_radar_intelligence():
                 matching_keys = [k for k in hourly_data.keys() if "precipitation" in k]
                 
                 if isinstance(matching_keys, list) and len(matching_keys) > 0:
-                    # ГАРАНТИРОВАННО ИСПРАВЛЕНО: Безопасное неразрушающее извлечение строки через итератор
+                    # ГАРАНТИРОВАННО ИСПРАВЛЕНО: Безопасное чтение через итератор, исключающее разрушение списка
                     target_key = next(iter(matching_keys))
                     p_arr = hourly_data.get(target_key, [])
                     
@@ -161,7 +161,8 @@ for dist in fdata:
         )
     ).add_to(m)
 
-st_folium(m, width=950, height=530, key="ufa_pure_radar_v6_fixed")
+# КЛЮЧ ВИДЖЕТА ОБНОВЛЕН: Принудительный сброс старого JS-кэша Chrome
+st_folium(m, width=950, height=530, key="ufa_pure_radar_v7_final")
 
 # --- МЕТЕОСВОДКА STREAMLIT ---
 st.markdown("### 📊 Аналитическая метеосводка по районам")
