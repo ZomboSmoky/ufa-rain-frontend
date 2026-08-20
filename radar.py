@@ -310,7 +310,7 @@ for dist in fdata:
         <div class="post-header"><div class="post-avatar">{dist['id'][:2]}</div><div class="post-username">{dist['name']}</div></div>
         <div class="post-image-alt"><div class="post-temp">{dist['temp']}°C</div><div class="post-feel">Ощущается как {dist['feel']}°C • {emoji}</div></div>
         <div class="post-content">
-            <div class="post-likes">❤️ Нравится «Фантастической четверке» и ещё 6 метеорологам</div>
+            <div class="post-likes">📊 Текущие метеопоказатели:</div>
             <div class="post-metrics">
                 <div>💧 <b>Влажность:</b> {dist['hum']}%</div><div>📊 <b>Давление:</b> {dist['press']} мм рт. ст.</div>
                 <div>💨 <b>Ветер:</b> {dist['wind']} м/с (порывы до {dist['gust']} м/с)</div>
@@ -339,3 +339,4 @@ for i, m_id in enumerate(ALL_MODELS):
             </div>
         </div>
         """, unsafe_allow_html=True)
+
