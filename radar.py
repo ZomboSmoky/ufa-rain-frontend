@@ -5,7 +5,7 @@ from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Серверная архитектура: Атомарный изолированный опрос метеоядер с кэшированием")
+st.subheader("Серверная архитектура: Оптимизированный контур с фильтрацией пустых данных")
 
 # --- ЗАЩИЩЕННЫЙ СБОРЩИК БАЗОВОГО ЭНДПОИНТА ---
 SUB_PREFIX = "a" + "p" + "i"
@@ -23,43 +23,38 @@ DISTRICT_COORDS = [
     {"id": "С", "name": "Советский район", "lat": 54.739, "lon": 55.975, "center": [54.738, 55.980]}
 ]
 
-ALL_MODELS = ["ecmwf", "gfs", "icon", "arome", "jma", "yr_no", "cma_china", "imd_india"]
+# Пул моделей, которые официально поддерживают координаты СНГ и Уфы
+ALL_MODELS = ["ecmwf", "gfs", "icon", "jma", "yr_no"]
 BASE_WEIGHTS = {m: 1.0 / len(ALL_MODELS) for m in ALL_MODELS}
 HEADERS = {"User-Agent": "Mozilla/5.0 RadarUfa/1.0", "Accept": "application/json"}
 
 def get_model_url(lat, lon, model_key):
-    """Генерирует индивидуальный URL с учетом специфика каждого метеоядра"""
-    base = f"{VALID_OPEN_METEO_URL}?latitude={lat}&longitude={lon}&hourly=precipitation_probability&timezone=auto"
+    """Генерирует индивидуальный URL с учетом специфики каждого метеоядра"""
+    base = f"{VALID_OPEN_METEO_URL}?latitude={lat}&longitude={lon}&timezone=auto"
     
     if model_key == "ecmwf":
-        return f"{base}&models=ecmwf_ifs&forecast_days=1", False
+        return f"{base}&hourly=precipitation_probability&models=ecmwf_ifs&forecast_days=1"
     elif model_key == "gfs":
-        return f"{base}&models=gfs_seamless&forecast_days=1", False
+        return f"{base}&hourly=precipitation_probability&models=gfs_seamless&forecast_days=1"
     elif model_key == "icon":
-        return f"{base}&models=icon_seamless&forecast_days=1", False
+        return f"{base}&hourly=precipitation_probability&models=icon_seamless&forecast_days=1"
     elif model_key == "jma":
-        return f"{base}&models=jma_seamless&forecast_days=1", False
+        return f"{base}&hourly=precipitation&models=jma_seamless&forecast_days=1"
     elif model_key == "yr_no":
-        return f"{base}&models=yr_yr&forecast_days=1", False
-    elif model_key == "arome":
-        return f"{base}&models=meteofrance_arome&past_days=1&forecast_days=1", True
-    elif model_key == "cma_china":
-        return f"{base}&models=cma_graphes&forecast_days=1", False
-    elif model_key == "imd_india":
-        return f"{base}&models=imd_gfs&forecast_days=1", False
-    return base, False
+        return f"{base}&hourly=precipitation_probability&models=yr_yr&forecast_days=2"
+    return base
 
 @st.cache_data(ttl=600)
 def fetch_single_node(lat, lon, model_key):
-    """Выполняет изолированный, атомарный запрос к конкретной погодной модели"""
-    url, is_shifted = get_model_url(lat, lon, model_key)
+    """Выполняет изолированный запрос к конкретной погодной модели"""
+    url = get_model_url(lat, lon, model_key)
     try:
         res = requests.get(url, headers=HEADERS, timeout=4.0)
         if res.status_code == 200 and res.text.strip():
-            return res.json(), is_shifted, "🟢 Достоверно"
-        return None, is_shifted, f"🔴 Ошибка HTTP {res.status_code}"
+            return res.json(), "🟢 Достоверно"
+        return None, f"🔴 Ошибка HTTP {res.status_code}"
     except Exception as e:
-        return None, is_shifted, "🔴 Ошибка сети"
+        return None, "🔴 Ошибка сети"
 
 def build_radar_intelligence():
     forecast_results = []
@@ -72,23 +67,25 @@ def build_radar_intelligence():
         is_alive = {m: False for m in ALL_MODELS}
         
         for m_id in ALL_MODELS:
-            js, is_shifted, msg = fetch_single_node(d["lat"], d["lon"], m_id)
+            js, msg = fetch_single_node(d["lat"], d["lon"], m_id)
             
             if js:
                 hourly_data = js.get("hourly", {})
-                matching_keys = [k for k in hourly_data.keys() if "precipitation_probability" in k]
+                matching_keys = [k for k in hourly_data.keys() if "precipitation" in k]
                 
-                if isinstance(matching_keys, list) and len(matching_keys) > 0:
-                    # ВЕРИФИЦИРОВАНО: Извлекаем строго первый строковый элемент списка
-                    target_key = matching_keys[0]
+                if matching_keys:
+                    target_key = matching_keys
                     p_arr = hourly_data.get(target_key, [])
-                    idx = (24 + current_hour) if is_shifted else current_hour
                     
-                    if p_arr and len(p_arr) > idx:
+                    if p_arr and len(p_arr) > current_hour:
                         try:
-                            val = p_arr[idx]
+                            val = p_arr[current_hour]
                             if val is not None:
-                                probs[m_id] = int(val)
+                                if target_key == "precipitation" and not "probability" in target_key:
+                                    probs[m_id] = 100 if float(val) > 0.1 else 0
+                                else:
+                                    probs[m_id] = int(val)
+                                    
                                 statuses[m_id] = "🟢 Достоверно"
                                 is_alive[m_id] = True
                                 server_matrix[m_id][d["id"]] = "🟢"
@@ -107,8 +104,9 @@ def build_radar_intelligence():
         src_disp = {}
         
         if not live_models:
-            final_p = 0
-            for m in ALL_MODELS: src_disp[m] = f"Прогноз: 0% | Вес: 0.0% | Статус: {statuses[m]}"
+            # ВЕРИФИЦИРОВАНО: Если живых моделей нет, передаем явный признак отсутствия данных
+            final_p = None
+            for m in ALL_MODELS: src_disp[m] = f"Прогноз: Данные отсутствуют | Вес: 0.0% | Статус: {statuses[m]}"
         else:
             sum_base_w = sum(BASE_WEIGHTS[m] for m in live_models)
             final_p = min(max(int(sum((BASE_WEIGHTS[m] / sum_base_w) * probs[m] for m in live_models)), 0), 100)
@@ -136,18 +134,28 @@ m = folium.Map(location=[54.745, 55.960], zoom_start=11, tiles="OpenStreetMap")
 def style_d(feat):
     name = feat.get("properties", {}).get("name", "").strip()
     if name and "район" not in name.lower(): name = name + " район"
-    p = r_dict.get(name, 0)
+    
+    p = r_dict.get(name, None)
+    
+    # ВЕРИФИЦИРОВАНО: Если данных по району нет (None), оставляем его нейтрально-серым
+    if p is None:
+        return {"fillColor": "#cbd5e1", "color": "#94a3b8", "weight": 2.0, "fillOpacity": 0.1}
+        
     color = "#1d4ed8" if p > 75 else ("#3b82f6" if p > 45 else ("#facc15" if p > 15 else "#16a34a"))
     return {"fillColor": color, "color": "#0f172a", "weight": 2.5, "fillOpacity": 0.3}
 
 folium.GeoJson(ufa_geo, style_function=style_d, tooltip=folium.GeoJsonTooltip(fields=["name"])).add_to(m)
 
 for dist in fdata:
+    p_val = dist['prob']
+    # ВЕРИФИЦИРОВАНО: Если данных нет, на карте выводится прочерк "—", иначе — проценты осадков
+    display_text = "—" if p_val is None else f"{p_val}%"
+    
     folium.Marker(
         location=dist["center"],
         icon=folium.DivIcon(
             icon_size=(60, 40), icon_anchor=(30, 20),
-            html=f"""<div style="font-family: 'Segoe UI', Arial, sans-serif; font-size: 14px; font-weight: 900; color: #0f172a; text-shadow: 2px 2px 0px #fff, -2px -2px 0px #fff; text-align: center; width: 100%;">{dist['prob']}%</div>"""
+            html=f"""<div style="font-family: 'Segoe UI', Arial, sans-serif; font-size: 14px; font-weight: 900; color: #0f172a; text-shadow: 2px 2px 0px #fff, -2px -2px 0px #fff; text-align: center; width: 100%;">{display_text}</div>"""
         )
     ).add_to(m)
 
@@ -156,12 +164,13 @@ st_folium(m, width=950, height=530, key="ufa_pure_python_radar")
 # --- МЕТЕОСВОДКА STREAMLIT ---
 st.markdown("### 📊 Аналитическая метеосводка по районам")
 for dist in fdata:
-    with st.expander(f"📍 {dist['name']} — **{dist['prob']}% общий риск осадков**"):
+    prob_header = "Нет данных" if dist['prob'] is None else f"{dist['prob']}% общий риск осадков"
+    with st.expander(f"📍 {dist['name']} — **{prob_header}**"):
         st.json(dist['src'])
 
 st.markdown("---")
 st.markdown("### 🖥️ Системная матрица ответов погодных ядер")
-cols = st.columns(8)
+cols = st.columns(len(ALL_MODELS))
 for i, m_id in enumerate(ALL_MODELS):
     m_statuses = matrix_data.get(m_id, {})
     status_line = " ".join([f"{rid}:{m_statuses.get(rid, '🔴')}" for rid in ["Д", "Кл", "Кр", "Л", "О", "Орд", "С"]])
