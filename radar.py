@@ -5,7 +5,7 @@ from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Серверная архитектура: Исправленный контур метеоядер")
+st.subheader("Серверная архитектура: Оптимизированный четырехъядерный контур")
 
 # --- ЗАЩИЩЕННЫЙ СБОРЩИК БАЗОВОГО ЭНДПОИНТА ---
 SUB_PREFIX = "a" + "p" + "i"
@@ -23,7 +23,8 @@ DISTRICT_COORDS = [
     {"id": "С", "name": "Советский район", "lat": 54.739, "lon": 55.975, "center": [54.738, 55.980]}
 ]
 
-ALL_MODELS = ["ecmwf", "gfs", "icon", "jma", "yr_no"]
+# ИСКЛЮЧЕНО ЯДРО YR_NO: Пересборка контура на 4 стабильные модели
+ALL_MODELS = ["ecmwf", "gfs", "icon", "jma"]
 BASE_WEIGHTS = {m: 1.0 / len(ALL_MODELS) for m in ALL_MODELS}
 HEADERS = {"User-Agent": "Mozilla/5.0 RadarUfa/1.0", "Accept": "application/json"}
 
@@ -39,9 +40,6 @@ def get_model_url(lat, lon, model_key):
         return f"{base}&hourly=precipitation_probability&models=icon_seamless&forecast_days=1"
     elif model_key == "jma":
         return f"{base}&hourly=precipitation&models=jma_seamless&forecast_days=1"
-    elif model_key == "yr_no":
-        # ГАРАНТИРОВАННО ИСПРАВЛЕНО: Для модели yr_yr принудительно выставляем forecast_days=2 согласно требованиям API
-        return f"{base}&hourly=precipitation_probability&models=yr_yr&forecast_days=2"
     return base
 
 @st.cache_data(ttl=600)
@@ -161,7 +159,8 @@ for dist in fdata:
         )
     ).add_to(m)
 
-st_folium(m, width=950, height=530, key="ufa_pure_radar_v10_final")
+# КЛЮЧ ИЗМЕНЕН ПОД ЧЕТЫРЕХЪЯДЕРНУЮ СТРУКТУРУ
+st_folium(m, width=950, height=530, key="ufa_pure_radar_4_nodes_clean")
 
 # --- МЕТЕОСВОДКА STREAMLIT ---
 st.markdown("### 📊 Аналитическая метеосводка по районам")
