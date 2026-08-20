@@ -5,7 +5,7 @@ from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Серверная архитектура: Финальный контур метеоядер")
+st.subheader("Серверная архитектура: Полный синхронизированный контур пяти ядер")
 
 # --- ЗАЩИЩЕННЫЙ СБОРЩИК БАЗОВОГО ЭНДПОИНТА ---
 SUB_PREFIX = "a" + "p" + "i"
@@ -73,8 +73,8 @@ def build_radar_intelligence():
                 matching_keys = [k for k in hourly_data.keys() if "precipitation" in k]
                 
                 if isinstance(matching_keys, list) and len(matching_keys) > 0:
-                    # ЖЕСТКАЯ ВЕРИФИКАЦИЯ: Извлекаем строку методом pop(0) без использования квадратных скобок в markdown
-                    target_key = matching_keys.pop(0)
+                    # ГАРАНТИРОВАННО ИСПРАВЛЕНО: Безопасное неразрушающее извлечение строки через итератор
+                    target_key = next(iter(matching_keys))
                     p_arr = hourly_data.get(target_key, [])
                     
                     if m_id == "yr_no":
@@ -161,7 +161,7 @@ for dist in fdata:
         )
     ).add_to(m)
 
-st_folium(m, width=950, height=530, key="ufa_pure_python_radar")
+st_folium(m, width=950, height=530, key="ufa_pure_radar_v6_fixed")
 
 # --- МЕТЕОСВОДКА STREAMLIT ---
 st.markdown("### 📊 Аналитическая метеосводка по районам")
@@ -172,6 +172,7 @@ for dist in fdata:
 
 st.markdown("---")
 st.markdown("### 🖥️ Системная матрица ответов погодных ядер")
+
 cols = st.columns(len(ALL_MODELS))
 for i, m_id in enumerate(ALL_MODELS):
     m_statuses = matrix_data.get(m_id, {})
