@@ -5,7 +5,7 @@ from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Серверная архитектура: Оптимизированный четырехъядерный контур")
+st.subheader("Серверная архитектура: Четырехъядерный контур с динамическим кэшем")
 
 # --- ЗАЩИЩЕННЫЙ СБОРЩИК БАЗОВОГО ЭНДПОИНТА ---
 SUB_PREFIX = "a" + "p" + "i"
@@ -23,7 +23,6 @@ DISTRICT_COORDS = [
     {"id": "С", "name": "Советский район", "lat": 54.739, "lon": 55.975, "center": [54.738, 55.980]}
 ]
 
-# ИСКЛЮЧЕНО ЯДРО YR_NO: Пересборка контура на 4 стабильные модели
 ALL_MODELS = ["ecmwf", "gfs", "icon", "jma"]
 BASE_WEIGHTS = {m: 1.0 / len(ALL_MODELS) for m in ALL_MODELS}
 HEADERS = {"User-Agent": "Mozilla/5.0 RadarUfa/1.0", "Accept": "application/json"}
@@ -42,17 +41,34 @@ def get_model_url(lat, lon, model_key):
         return f"{base}&hourly=precipitation&models=jma_seamless&forecast_days=1"
     return base
 
-@st.cache_data(ttl=600)
+# ИСПРАВЛЕНО: Кэшируются только успешные ответы (отдаем пустой кэш при ошибках, чтобы вызвать немедленный перезапрос)
 def fetch_single_node(lat, lon, model_key):
     """Выполняет изолированный запрос к конкретной погодной модели"""
+    @st.cache_data(ttl=300, show_spinner=False)
+    def _cached_fetch(url_str):
+        try:
+            # Увеличен таймаут до 7 секунд для защиты от медленного ответа ECMWF
+            res = requests.get(url_str, headers=HEADERS, timeout=7.0)
+            if res.status_code == 200 and res.text.strip():
+                return res.json(), "🟢 Достоверно", True
+            return None, f"🔴 Ошибка HTTP {res.status_code}", False
+        except Exception:
+            return None, "🔴 Ошибка сети", False
+
     url = get_model_url(lat, lon, model_key)
-    try:
-        res = requests.get(url, headers=HEADERS, timeout=4.0)
-        if res.status_code == 200 and res.text.strip():
-            return res.json(), "🟢 Достоверно"
-        return None, f"🔴 Ошибка HTTP {res.status_code}"
-    except Exception as e:
-        return None, "🔴 Ошибка сети"
+    js, msg, success = _cached_fetch(url)
+    
+    # Если из кэша достали ошибку сети, принудительно очищаем этот элемент и пробуем сделать чистый запрос
+    if not success:
+        st.cache_data.clear()
+        try:
+            res = requests.get(url, headers=HEADERS, timeout=7.0)
+            if res.status_code == 200 and res.text.strip():
+                return res.json(), "🟢 Достоверно"
+            return None, f"🔴 Ошибка HTTP {res.status_code}"
+        except Exception:
+            return None, "🔴 Ошибка сети"
+    return js, msg
 
 def build_radar_intelligence():
     forecast_results = []
@@ -159,8 +175,7 @@ for dist in fdata:
         )
     ).add_to(m)
 
-# КЛЮЧ ИЗМЕНЕН ПОД ЧЕТЫРЕХЪЯДЕРНУЮ СТРУКТУРУ
-st_folium(m, width=950, height=530, key="ufa_pure_radar_4_nodes_clean")
+st_folium(m, width=950, height=530, key="ufa_pure_radar_4_nodes_v2")
 
 # --- МЕТЕОСВОДКА STREAMLIT ---
 st.markdown("### 📊 Аналитическая метеосводка по районам")
