@@ -167,7 +167,7 @@ def build_radar_intelligence():
     network_package = fetch_all_data_parallel()
     forecast_results = []
     server_matrix = {m: {d["id"]: "🔴" for d in DISTRICT_COORDS} for m in ALL_MODELS}
-    current_hour = datetime.now().hour
+    current_hour = (datetime.utcnow().hour + 5) % 24
     
     for d in DISTRICT_COORDS:
         probs = {m: 0 for m in ALL_MODELS}
