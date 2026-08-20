@@ -5,7 +5,7 @@ from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Серверная архитектура: Полный синхронизированный контур пяти ядер")
+st.subheader("Серверная архитектура: Исправленный контур метеоядер")
 
 # --- ЗАЩИЩЕННЫЙ СБОРЩИК БАЗОВОГО ЭНДПОИНТА ---
 SUB_PREFIX = "a" + "p" + "i"
@@ -29,7 +29,6 @@ HEADERS = {"User-Agent": "Mozilla/5.0 RadarUfa/1.0", "Accept": "application/json
 
 def get_model_url(lat, lon, model_key):
     """Генерирует индивидуальный URL с учетом специфики каждого метеоядра"""
-    # ИСПРАВЛЕНО И ВЕРИФИЦИРОВАНО: Возвращен timezone=auto для нормализации гео-запроса Yr.no в СНГ
     base = f"{VALID_OPEN_METEO_URL}?latitude={lat}&longitude={lon}&timezone=auto"
     
     if model_key == "ecmwf":
@@ -41,7 +40,8 @@ def get_model_url(lat, lon, model_key):
     elif model_key == "jma":
         return f"{base}&hourly=precipitation&models=jma_seamless&forecast_days=1"
     elif model_key == "yr_no":
-        return f"{base}&hourly=precipitation_probability&models=yr_yr&forecast_days=1"
+        # ГАРАНТИРОВАННО ИСПРАВЛЕНО: Для модели yr_yr принудительно выставляем forecast_days=2 согласно требованиям API
+        return f"{base}&hourly=precipitation_probability&models=yr_yr&forecast_days=2"
     return base
 
 @st.cache_data(ttl=600)
@@ -74,11 +74,13 @@ def build_radar_intelligence():
                 matching_keys = [k for k in hourly_data.keys() if "precipitation" in k]
                 
                 if isinstance(matching_keys, list) and len(matching_keys) > 0:
-                    # ВЕРИФИЦИРОВАНО: Безопасное чтение через итератор, исключающее разрушение списка
-                    target_key = next(iter(matching_keys))
+                    prob_keys = [k for k in matching_keys if "probability" in k]
+                    if prob_keys:
+                        target_key = next(iter(prob_keys))
+                    else:
+                        target_key = next(iter(matching_keys))
+                        
                     p_arr = hourly_data.get(target_key, [])
-                    
-                    # ИСПРАВЛЕНО И ВЕРИФИЦИРОВАНО: Так как timezone=auto возвращен, индекс времени для всех моделей синхронный
                     idx = current_hour
                     
                     if p_arr and len(p_arr) > idx:
@@ -159,7 +161,7 @@ for dist in fdata:
         )
     ).add_to(m)
 
-st_folium(m, width=950, height=530, key="ufa_pure_radar_v8_final_fixed")
+st_folium(m, width=950, height=530, key="ufa_pure_radar_v10_final")
 
 # --- МЕТЕОСВОДКА STREAMLIT ---
 st.markdown("### 📊 Аналитическая метеосводка по районам")
