@@ -247,16 +247,16 @@ for dist in fdata:
     p = dist["prob"]
     p_text = "—" if p is None else f"{p}%"
     
-    # Полное корректное декодирование WMO кодов
+    # ИСПРАВЛЕНО: Списки кодов WMO преобразованы в явные кортежи
     code = dist["wmo"]
     if code == 0: emoji = "☀️"
-    elif code in: emoji = "🌤️"
+    elif code in (1, 2): emoji = "🌤️"
     elif code == 3: emoji = "☁️"
-    elif code in: emoji = "🌫️"
-    elif code in: emoji = "🌦️"
-    elif code in: emoji = "🌧️"
-    elif code in: emoji = "🌨️"
-    elif code in: emoji = "⛈️"
+    elif code in (45, 48): emoji = "🌫️"
+    elif code in (51, 53, 55, 56, 57): emoji = "🌦️"
+    elif code in (61, 63, 65, 66, 67): emoji = "🌧️"
+    elif code in (71, 73, 75, 77, 85, 86): emoji = "🌨️"
+    elif code in (95, 96, 99): emoji = "⛈️"
     else: emoji = "☁️"
         
     ring_class = "ring-dry" if (p is None or p < 15) else ("ring-warning" if p < 45 else "ring-danger")
@@ -303,13 +303,13 @@ posts_html = '<div class="insta-grid">'
 for dist in fdata:
     code = dist["wmo"]
     if code == 0: emoji = "☀️"
-    elif code in: emoji = "🌤️"
+    elif code in (1, 2): emoji = "🌤️"
     elif code == 3: emoji = "☁️"
-    elif code in: emoji = "🌫️"
-    elif code in: emoji = "🌦️"
-    elif code in: emoji = "🌧️"
-    elif code in: emoji = "🌨️"
-    elif code in: emoji = "⛈️"
+    elif code in (45, 48): emoji = "🌫️"
+    elif code in (51, 53, 55, 56, 57): emoji = "🌦️"
+    elif code in (61, 63, 65, 66, 67): emoji = "🌧️"
+    elif code in (71, 73, 75, 77, 85, 86): emoji = "🌨️"
+    elif code in (95, 96, 99): emoji = "⛈️"
     else: emoji = "☁️"
         
     gust_alert = "⚠️ Внимание: сильные порывы ветра!" if dist["gust"] > 11.0 else "Потоки ветра стабильны"
