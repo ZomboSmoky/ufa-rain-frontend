@@ -111,7 +111,7 @@ st.set_page_config(page_title="WeatherGram Ufa", layout="wide", page_icon="📸"
 st.markdown(INSTAGRAM_STYLE, unsafe_allow_html=True)
 
 st.title("📸 WeatherGram Ufa")
-st.caption("Полнофункциональный премиум-контур радара на базе «Фантастической четверки»")
+st.caption("Полнофункциональный погодный инстаграм-глянец радара Уфы")
 
 # --- СЕРВЕРНЫЙ ЭНДПОИНТ API ---
 SUB_PREFIX = "a" + "p" + "i"
@@ -131,19 +131,6 @@ DISTRICT_COORDS = [
 ALL_MODELS = ["ecmwf", "gfs", "icon", "jma"]
 BASE_WEIGHTS = {m: 1.0 / len(ALL_MODELS) for m in ALL_MODELS}
 HEADERS = {"User-Agent": "Mozilla/5.0 RadarUfa/1.0", "Accept": "application/json"}
-
-def get_wmo_emoji(code):
-    """Декодирует международный код погоды WMO в понятный эмодзи"""
-    if code is None: return "❓"
-    if code == 0: return "☀️"
-    if code in: return "🌤️"
-    if code == 3: return "☁️"
-    if code in: return "🌫️"
-    if code in: return "🌦️"
-    if code in: return "🌧️"
-    if code in: return "🌨️"
-    if code in: return "⛈️"
-    return "☁️"
 
 def get_model_url(lat, lon, model_key):
     """Генерирует индивидуальный URL со всеми запрашиваемыми физическими метриками"""
@@ -260,7 +247,7 @@ for dist in fdata:
     p = dist["prob"]
     p_text = "—" if p is None else f"{p}%"
     
-    # Исправленное декодирование WMO-кодов погоды в эмодзи
+    # Полное корректное декодирование WMO кодов
     code = dist["wmo"]
     if code == 0: emoji = "☀️"
     elif code in: emoji = "🌤️"
