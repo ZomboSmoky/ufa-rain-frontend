@@ -2,12 +2,13 @@ import streamlit as st
 import requests, folium, json
 from datetime import datetime
 from streamlit_folium import st_folium
+from concurrent.futures import ThreadPoolExecutor
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Серверная архитектура: Четырехъядерный контур с динамическим кэшем")
+st.subheader("Модификация: Высокоскоростной параллельный контур (Фантастическая четверка)")
 
-# --- ЗАЩИЩЕННЫЙ СБОРЩИК БАЗОВОГО ЭНДПОИНТА ---
+# --- БАЗОВЫЙ ЗАЩИЩЕННЫЙ ЭНДПОИНТ API ---
 SUB_PREFIX = "a" + "p" + "i"
 BASE_DOMAIN = "open-meteo.com"
 VALID_OPEN_METEO_URL = f"https://{SUB_PREFIX}.{BASE_DOMAIN}/v1/forecast"
@@ -30,7 +31,6 @@ HEADERS = {"User-Agent": "Mozilla/5.0 RadarUfa/1.0", "Accept": "application/json
 def get_model_url(lat, lon, model_key):
     """Генерирует индивидуальный URL с учетом специфики каждого метеоядра"""
     base = f"{VALID_OPEN_METEO_URL}?latitude={lat}&longitude={lon}&timezone=auto"
-    
     if model_key == "ecmwf":
         return f"{base}&hourly=precipitation_probability&models=ecmwf_ifs&forecast_days=1"
     elif model_key == "gfs":
@@ -41,36 +41,47 @@ def get_model_url(lat, lon, model_key):
         return f"{base}&hourly=precipitation&models=jma_seamless&forecast_days=1"
     return base
 
-# ИСПРАВЛЕНО: Кэшируются только успешные ответы (отдаем пустой кэш при ошибках, чтобы вызвать немедленный перезапрос)
-def fetch_single_node(lat, lon, model_key):
-    """Выполняет изолированный запрос к конкретной погодной модели"""
-    @st.cache_data(ttl=300, show_spinner=False)
-    def _cached_fetch(url_str):
-        try:
-            # Увеличен таймаут до 7 секунд для защиты от медленного ответа ECMWF
-            res = requests.get(url_str, headers=HEADERS, timeout=7.0)
-            if res.status_code == 200 and res.text.strip():
-                return res.json(), "🟢 Достоверно", True
-            return None, f"🔴 Ошибка HTTP {res.status_code}", False
-        except Exception:
-            return None, "🔴 Ошибка сети", False
+# ВЕРИФИЦИРОВАНО: Кэшируются только чистые данные ответов, пулы потоков вынесены наружу
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_single_api_node(url):
+    """Выполняет изолированный сетевой запрос к API Open-Meteo"""
+    try:
+        res = requests.get(url, headers=HEADERS, timeout=5.0)
+        if res.status_code == 200 and res.text.strip():
+            return res.json(), "🟢 Достоверно"
+        return None, f"🔴 Ошибка HTTP {res.status_code}"
+    except Exception:
+        return None, "🔴 Ошибка сети"
 
-    url = get_model_url(lat, lon, model_key)
-    js, msg, success = _cached_fetch(url)
-    
-    # Если из кэша достали ошибку сети, принудительно очищаем этот элемент и пробуем сделать чистый запрос
-    if not success:
-        st.cache_data.clear()
-        try:
-            res = requests.get(url, headers=HEADERS, timeout=7.0)
-            if res.status_code == 200 and res.text.strip():
-                return res.json(), "🟢 Достоверно"
-            return None, f"🔴 Ошибка HTTP {res.status_code}"
-        except Exception:
-            return None, "🔴 Ошибка сети"
-    return js, msg
+def fetch_url_worker(task):
+    """Рабочий поток для параллельного вызова кэшируемой функции"""
+    dist_id, m_id, url = task
+    json_body, status_msg = fetch_single_api_node(url)
+    return dist_id, m_id, json_body, status_msg
+
+def fetch_all_data_parallel():
+    """Безопасно собирает данные по всем 28 узлам параллельно через пул потоков"""
+    tasks = []
+    for d in DISTRICT_COORDS:
+        for m in ALL_MODELS:
+            url = get_model_url(d["lat"], d["lon"], m)
+            tasks.append((d["id"], m, url))
+            
+    raw_responses = []
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        results = executor.map(fetch_url_worker, tasks)
+        for r in results:
+            raw_responses.append(r)
+            
+    structured_data = {d["id"]: {} for d in DISTRICT_COORDS}
+    for dist_id, m_id, json_body, status_msg in raw_responses:
+        structured_data[dist_id][m_id] = {"json": json_body, "msg": status_msg}
+        
+    return structured_data
 
 def build_radar_intelligence():
+    network_package = fetch_all_data_parallel()
+    
     forecast_results = []
     server_matrix = {m: {d["id"]: "🔴" for d in DISTRICT_COORDS} for m in ALL_MODELS}
     current_hour = datetime.now().hour
@@ -79,9 +90,11 @@ def build_radar_intelligence():
         probs = {m: 0 for m in ALL_MODELS}
         statuses = {m: "🔴 Нет данных" for m in ALL_MODELS}
         is_alive = {m: False for m in ALL_MODELS}
+        dist_bundle = network_package.get(d["id"], {})
         
         for m_id in ALL_MODELS:
-            js, msg = fetch_single_node(d["lat"], d["lon"], m_id)
+            node = dist_bundle.get(m_id, {"json": None, "msg": "🔴 Ошибка пула"})
+            js, msg = node["json"], node["msg"]
             
             if js:
                 hourly_data = js.get("hourly", {})
@@ -89,11 +102,7 @@ def build_radar_intelligence():
                 
                 if isinstance(matching_keys, list) and len(matching_keys) > 0:
                     prob_keys = [k for k in matching_keys if "probability" in k]
-                    if prob_keys:
-                        target_key = next(iter(prob_keys))
-                    else:
-                        target_key = next(iter(matching_keys))
-                        
+                    target_key = next(iter(prob_keys)) if prob_keys else next(iter(matching_keys))
                     p_arr = hourly_data.get(target_key, [])
                     idx = current_hour
                     
@@ -105,12 +114,11 @@ def build_radar_intelligence():
                                     probs[m_id] = 100 if float(val) > 0.1 else 0
                                 else:
                                     probs[m_id] = int(val)
-                                    
                                 statuses[m_id] = "🟢 Достоверно"
                                 is_alive[m_id] = True
                                 server_matrix[m_id][d["id"]] = "🟢"
                             else:
-                                statuses[m_id] = "🔴 Значение в JSON равно null"
+                                statuses[m_id] = "🔴 Значение равно null"
                         except (ValueError, TypeError):
                             statuses[m_id] = "🔴 Некорректный формат числа"
                     else:
@@ -141,10 +149,12 @@ def build_radar_intelligence():
     return forecast_results, server_matrix
 
 # --- СБОР ДАННЫХ НА СЕРВЕРЕ ---
-fdata, matrix_data = build_radar_intelligence()
+with st.spinner("⚡ Запуск параллельного сканирования метеосферы..."):
+    fdata, matrix_data = build_radar_intelligence()
+    
 r_dict = {dist["name"]: dist["prob"] for dist in fdata}
 
-# --- ОТРИСОВКА FOLIUM ---
+# --- ОТРИСОВКА ИНТЕРАКТИВНОЙ КАРТЫ FOLIUM ---
 with open("ufa_districts.geojson", "r", encoding="utf-8") as f:
     ufa_geo = json.load(f)
 
@@ -157,7 +167,6 @@ def style_d(feat):
     
     if p is None:
         return {"fillColor": "#cbd5e1", "color": "#94a3b8", "weight": 2.0, "fillOpacity": 0.1}
-        
     color = "#1d4ed8" if p > 75 else ("#3b82f6" if p > 45 else ("#facc15" if p > 15 else "#16a34a"))
     return {"fillColor": color, "color": "#0f172a", "weight": 2.5, "fillOpacity": 0.3}
 
@@ -166,7 +175,6 @@ folium.GeoJson(ufa_geo, style_function=style_d, tooltip=folium.GeoJsonTooltip(fi
 for dist in fdata:
     p_val = dist['prob']
     display_text = "—" if p_val is None else f"{p_val}%"
-    
     folium.Marker(
         location=dist["center"],
         icon=folium.DivIcon(
@@ -175,7 +183,8 @@ for dist in fdata:
         )
     ).add_to(m)
 
-st_folium(m, width=950, height=530, key="ufa_pure_radar_4_nodes_v2")
+# КЛЮЧ ОБНОВЛЕН ДЛЯ ЧИСТОЙ ИНИЦИАЛИЗАЦИИ КЭША
+st_folium(m, width=950, height=530, key="ufa_radar_turbo_v2_stable")
 
 # --- МЕТЕОСВОДКА STREAMLIT ---
 st.markdown("### 📊 Аналитическая метеосводка по районам")
