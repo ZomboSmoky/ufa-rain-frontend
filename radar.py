@@ -72,9 +72,9 @@ def build_radar_intelligence():
                 hourly_data = js.get("hourly", {})
                 matching_keys = [k for k in hourly_data.keys() if "precipitation" in k]
                 
-                if matching_keys and len(matching_keys) > 0:
-                    # ВЕРИФИЦИРОВАНО В КОНСОЛИ: Извлекаем строго текстовую строку по индексу [0]
-                    target_key = matching_keys[0]
+                if isinstance(matching_keys, list) and len(matching_keys) > 0:
+                    # ЖЕСТКАЯ ВЕРИФИКАЦИЯ: Извлекаем строку методом pop(0) без использования квадратных скобок в markdown
+                    target_key = matching_keys.pop(0)
                     p_arr = hourly_data.get(target_key, [])
                     
                     if m_id == "yr_no":
