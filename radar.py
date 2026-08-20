@@ -5,7 +5,7 @@ from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Серверная архитектура: Проверенный пакетный контур (Синхронизация UTC+5)")
+st.subheader("Серверная архитектура: Атомарный изолированный опрос метеоядер с кэшированием")
 
 # --- ЗАЩИЩЕННЫЙ СБОРЩИК БАЗОВОГО ЭНДПОИНТА ---
 SUB_PREFIX = "a" + "p" + "i"
@@ -23,58 +23,78 @@ DISTRICT_COORDS = [
     {"id": "С", "name": "Советский район", "lat": 54.739, "lon": 55.975, "center": [54.738, 55.980]}
 ]
 
-# Соответствие внутренних имен моделей в API Open-Meteo
-OM_MAPPING = {
-    "ecmwf": "ecmwf_ifs", "gfs": "gfs_seamless", "icon": "icon_seamless",
-    "arome": "meteofrance_arome", "jma": "jma_seamless", "yr_no": "yr_yr",
-    "cma_china": "cma_graphes", "imd_india": "imd_gfs"
-}
-ALL_MODELS = list(OM_MAPPING.keys())
+ALL_MODELS = ["ecmwf", "gfs", "icon", "arome", "jma", "yr_no", "cma_china", "imd_india"]
 BASE_WEIGHTS = {m: 1.0 / len(ALL_MODELS) for m in ALL_MODELS}
-
 HEADERS = {"User-Agent": "Mozilla/5.0 RadarUfa/1.0", "Accept": "application/json"}
 
-def fetch_district_packet(lat, lon):
-    """Запрашивает все 8 моделей за один раз с параметром past_days=1"""
-    models_csv = ",".join(OM_MAPPING.values())
-    url = f"{VALID_OPEN_METEO_URL}?latitude={lat}&longitude={lon}&hourly=precipitation_probability&models={models_csv}&past_days=1&forecast_days=1&timezone=auto"
+def get_model_url(lat, lon, model_key):
+    """Генерирует индивидуальный URL с учетом специфики каждого метеоядра"""
+    base = f"{VALID_OPEN_METEO_URL}?latitude={lat}&longitude={lon}&hourly=precipitation_probability&timezone=auto"
     
+    if model_key == "ecmwf":
+        return f"{base}&models=ecmwf_ifs&forecast_days=1", False
+    elif model_key == "gfs":
+        return f"{base}&models=gfs_seamless&forecast_days=1", False
+    elif model_key == "icon":
+        return f"{base}&models=icon_seamless&forecast_days=1", False
+    elif model_key == "jma":
+        return f"{base}&models=jma_seamless&forecast_days=1", False
+    elif model_key == "yr_no":
+        return f"{base}&models=yr_yr&forecast_days=1", False
+    elif model_key == "arome":
+        # Метео-Франция требует архивный сдвиг суток для локальных сеток
+        return f"{base}&models=meteofrance_arome&past_days=1&forecast_days=1", True
+    elif model_key == "cma_china":
+        return f"{base}&models=cma_graphes&forecast_days=1", False
+    elif model_key == "imd_india":
+        return f"{base}&models=imd_gfs&forecast_days=1", False
+    return base, False
+
+@st.cache_data(ttl=600)  # Кэширование на 10 минут предотвращает перегрузку сети и зависание интерфейса
+def fetch_single_node(lat, lon, model_key):
+    """Выполняет изолированный, атомарный запрос к конкретной погодной модели"""
+    url, is_shifted = get_model_url(lat, lon, model_key)
     try:
-        res = requests.get(url, headers=HEADERS, timeout=6.0)
+        res = requests.get(url, headers=HEADERS, timeout=4.0)
         if res.status_code == 200 and res.text.strip():
-            return res.json(), "🟢 Успешно"
-        return None, f"🔴 Ошибка HTTP {res.status_code}"
+            return res.json(), is_shifted, "🟢 Достоверно"
+        return None, is_shifted, f"🔴 Ошибка HTTP {res.status_code}"
     except Exception as e:
-        return None, f"🔴 Ошибка сети"
+        return None, is_shifted, "🔴 Ошибка сети"
 
 def build_radar_intelligence():
     forecast_results = []
     server_matrix = {m: {d["id"]: "🔴" for d in DISTRICT_COORDS} for m in ALL_MODELS}
-    
-    # Синхронизация часового индекса с учетом вчерашних суток (+24 часа)
     current_hour = datetime.now().hour
-    target_index = 24 + current_hour
     
     for d in DISTRICT_COORDS:
         probs = {m: 0 for m in ALL_MODELS}
         statuses = {m: "🔴 Нет данных" for m in ALL_MODELS}
         is_alive = {m: False for m in ALL_MODELS}
         
-        js, msg = fetch_district_packet(d["lat"], d["lon"])
-        
-        if js:
-            hourly_data = js.get("hourly", {})
-            for m_id, sys_name in OM_MAPPING.items():
-                p_arr = hourly_data.get(f"precipitation_probability_{sys_name}", [])
-                if p_arr and len(p_arr) > target_index:
-                    probs[m_id] = int(p_arr[target_index])
-                    statuses[m_id] = "🟢 Достоверно"
-                    is_alive[m_id] = True
-                    server_matrix[m_id][d["id"]] = "🟢"
+        # Атомарный последовательный обход с индивидуальной обработкой
+        for m_id in ALL_MODELS:
+            js, is_shifted, msg = fetch_single_node(d["lat"], d["lon"], m_id)
+            
+            if js:
+                hourly_data = js.get("hourly", {})
+                # Динамически определяем системное имя переменной в JSON
+                var_key = [k for k in hourly_data.keys() if "precipitation_probability" in k]
+                
+                if var_key:
+                    p_arr = hourly_data.get(var_key[0], [])
+                    idx = (24 + current_hour) if is_shifted else current_hour
+                    
+                    if p_arr and len(p_arr) > idx:
+                        probs[m_id] = int(p_arr[idx])
+                        statuses[m_id] = "🟢 Достоверно"
+                        is_alive[m_id] = True
+                        server_matrix[m_id][d["id"]] = "🟢"
+                    else:
+                        statuses[m_id] = "🔴 Ошибка диапазона индексов"
                 else:
-                    statuses[m_id] = f"🔴 Ошибка индексов (точек: {len(p_arr)})"
-        else:
-            for m_id in ALL_MODELS:
+                    statuses[m_id] = "🔴 Переменная осадков отсутствует"
+            else:
                 statuses[m_id] = msg
 
         live_models = [m for m in ALL_MODELS if is_alive[m]]
@@ -111,7 +131,6 @@ def style_d(feat):
     name = feat.get("properties", {}).get("name", "").strip()
     if name and "район" not in name.lower(): name = name + " район"
     p = r_dict.get(name, 0)
-    # Корректный тернарный оператор без лишних символов
     color = "#1d4ed8" if p > 75 else ("#3b82f6" if p > 45 else ("#facc15" if p > 15 else "#16a34a"))
     return {"fillColor": color, "color": "#0f172a", "weight": 2.5, "fillOpacity": 0.3}
 
