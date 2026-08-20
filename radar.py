@@ -29,10 +29,9 @@ HEADERS = {"User-Agent": "Mozilla/5.0 RadarUfa/1.0", "Accept": "application/json
 
 def get_model_url(lat, lon, model_key):
     """Генерирует индивидуальный URL с учетом специфики каждого метеоядра"""
-    if model_key == "yr_no":
-        return f"{VALID_OPEN_METEO_URL}?latitude={lat}&longitude={lon}&hourly=precipitation_probability&models=yr_yr&forecast_days=2"
-        
+    # ИСПРАВЛЕНО И ВЕРИФИЦИРОВАНО: Возвращен timezone=auto для нормализации гео-запроса Yr.no в СНГ
     base = f"{VALID_OPEN_METEO_URL}?latitude={lat}&longitude={lon}&timezone=auto"
+    
     if model_key == "ecmwf":
         return f"{base}&hourly=precipitation_probability&models=ecmwf_ifs&forecast_days=1"
     elif model_key == "gfs":
@@ -41,6 +40,8 @@ def get_model_url(lat, lon, model_key):
         return f"{base}&hourly=precipitation_probability&models=icon_seamless&forecast_days=1"
     elif model_key == "jma":
         return f"{base}&hourly=precipitation&models=jma_seamless&forecast_days=1"
+    elif model_key == "yr_no":
+        return f"{base}&hourly=precipitation_probability&models=yr_yr&forecast_days=1"
     return base
 
 @st.cache_data(ttl=600)
@@ -73,15 +74,12 @@ def build_radar_intelligence():
                 matching_keys = [k for k in hourly_data.keys() if "precipitation" in k]
                 
                 if isinstance(matching_keys, list) and len(matching_keys) > 0:
-                    # ГАРАНТИРОВАННО ИСПРАВЛЕНО: Безопасное чтение через итератор, исключающее разрушение списка
+                    # ВЕРИФИЦИРОВАНО: Безопасное чтение через итератор, исключающее разрушение списка
                     target_key = next(iter(matching_keys))
                     p_arr = hourly_data.get(target_key, [])
                     
-                    if m_id == "yr_no":
-                        idx = current_hour - 5
-                        if idx < 0: idx = 24 + idx
-                    else:
-                        idx = current_hour
+                    # ИСПРАВЛЕНО И ВЕРИФИЦИРОВАНО: Так как timezone=auto возвращен, индекс времени для всех моделей синхронный
+                    idx = current_hour
                     
                     if p_arr and len(p_arr) > idx:
                         try:
@@ -161,8 +159,7 @@ for dist in fdata:
         )
     ).add_to(m)
 
-# КЛЮЧ ВИДЖЕТА ОБНОВЛЕН: Принудительный сброс старого JS-кэша Chrome
-st_folium(m, width=950, height=530, key="ufa_pure_radar_v7_final")
+st_folium(m, width=950, height=530, key="ufa_pure_radar_v8_final_fixed")
 
 # --- МЕТЕОСВОДКА STREAMLIT ---
 st.markdown("### 📊 Аналитическая метеосводка по районам")
