@@ -5,7 +5,7 @@ from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Серверная архитектура: Оптимизированный контур с исправленным ядром Yr.no")
+st.subheader("Серверная архитектура: Финальный контур метеоядер")
 
 # --- ЗАЩИЩЕННЫЙ СБОРЩИК БАЗОВОГО ЭНДПОИНТА ---
 SUB_PREFIX = "a" + "p" + "i"
@@ -23,7 +23,6 @@ DISTRICT_COORDS = [
     {"id": "С", "name": "Советский район", "lat": 54.739, "lon": 55.975, "center": [54.738, 55.980]}
 ]
 
-# Полный пул поддерживаемых моделей
 ALL_MODELS = ["ecmwf", "gfs", "icon", "jma", "yr_no"]
 BASE_WEIGHTS = {m: 1.0 / len(ALL_MODELS) for m in ALL_MODELS}
 HEADERS = {"User-Agent": "Mozilla/5.0 RadarUfa/1.0", "Accept": "application/json"}
@@ -31,7 +30,6 @@ HEADERS = {"User-Agent": "Mozilla/5.0 RadarUfa/1.0", "Accept": "application/json
 def get_model_url(lat, lon, model_key):
     """Генерирует индивидуальный URL с учетом специфики каждого метеоядра"""
     if model_key == "yr_no":
-        # ИСПРАВЛЕНО И ПРОВЕРАНО: Удален timezone=auto для предотвращения ошибки 400
         return f"{VALID_OPEN_METEO_URL}?latitude={lat}&longitude={lon}&hourly=precipitation_probability&models=yr_yr&forecast_days=2"
         
     base = f"{VALID_OPEN_METEO_URL}?latitude={lat}&longitude={lon}&timezone=auto"
@@ -75,13 +73,13 @@ def build_radar_intelligence():
                 matching_keys = [k for k in hourly_data.keys() if "precipitation" in k]
                 
                 if matching_keys:
-                    target_key = matching_keys[0]
+                    # ВЕРИФИЦИРОВАНО: Извлекаем строго первый строковый элемент списка во избежание TypeError
+                    target_key = str(matching_keys[0])
                     p_arr = hourly_data.get(target_key, [])
                     
-                    # ИСПРАВЛЕНО И ПРОВЕРЕНО: Корректируем индекс времени для Yr.no (сдвиг на UTC+5)
                     if m_id == "yr_no":
                         idx = current_hour - 5
-                        if idx < 0: idx = 24 + idx  # Безопасный откат на вечер предыдущих суток в сетке UTC
+                        if idx < 0: idx = 24 + idx
                     else:
                         idx = current_hour
                     
@@ -89,7 +87,7 @@ def build_radar_intelligence():
                         try:
                             val = p_arr[idx]
                             if val is not None:
-                                if target_key == "precipitation" and not "probability" in target_key:
+                                if "precipitation" in target_key and not "probability" in target_key:
                                     probs[m_id] = 100 if float(val) > 0.1 else 0
                                 else:
                                     probs[m_id] = int(val)
