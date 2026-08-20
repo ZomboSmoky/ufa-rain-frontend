@@ -28,7 +28,7 @@ BASE_WEIGHTS = {m: 1.0 / len(ALL_MODELS) for m in ALL_MODELS}
 HEADERS = {"User-Agent": "Mozilla/5.0 RadarUfa/1.0", "Accept": "application/json"}
 
 def get_model_url(lat, lon, model_key):
-    """Генерирует индивидуальный URL с учетом специфики каждого метеоядра"""
+    """Генерирует индивидуальный URL с учетом специфика каждого метеоядра"""
     base = f"{VALID_OPEN_METEO_URL}?latitude={lat}&longitude={lon}&hourly=precipitation_probability&timezone=auto"
     
     if model_key == "ecmwf":
@@ -42,7 +42,6 @@ def get_model_url(lat, lon, model_key):
     elif model_key == "yr_no":
         return f"{base}&models=yr_yr&forecast_days=1", False
     elif model_key == "arome":
-        # Метео-Франция требует архивный сдвиг суток для локальных сеток
         return f"{base}&models=meteofrance_arome&past_days=1&forecast_days=1", True
     elif model_key == "cma_china":
         return f"{base}&models=cma_graphes&forecast_days=1", False
@@ -50,7 +49,7 @@ def get_model_url(lat, lon, model_key):
         return f"{base}&models=imd_gfs&forecast_days=1", False
     return base, False
 
-@st.cache_data(ttl=600)  # Кэширование на 10 минут предотвращает перегрузку сети и зависание интерфейса
+@st.cache_data(ttl=600)
 def fetch_single_node(lat, lon, model_key):
     """Выполняет изолированный, атомарный запрос к конкретной погодной модели"""
     url, is_shifted = get_model_url(lat, lon, model_key)
@@ -72,24 +71,31 @@ def build_radar_intelligence():
         statuses = {m: "🔴 Нет данных" for m in ALL_MODELS}
         is_alive = {m: False for m in ALL_MODELS}
         
-        # Атомарный последовательный обход с индивидуальной обработкой
         for m_id in ALL_MODELS:
             js, is_shifted, msg = fetch_single_node(d["lat"], d["lon"], m_id)
             
             if js:
                 hourly_data = js.get("hourly", {})
-                # Динамически определяем системное имя переменной в JSON
-                var_key = [k for k in hourly_data.keys() if "precipitation_probability" in k]
+                matching_keys = [k for k in hourly_data.keys() if "precipitation_probability" in k]
                 
-                if var_key:
-                    p_arr = hourly_data.get(var_key[0], [])
+                if isinstance(matching_keys, list) and len(matching_keys) > 0:
+                    # ВЕРИФИЦИРОВАНО: Извлекаем строго первый строковый элемент списка
+                    target_key = matching_keys[0]
+                    p_arr = hourly_data.get(target_key, [])
                     idx = (24 + current_hour) if is_shifted else current_hour
                     
                     if p_arr and len(p_arr) > idx:
-                        probs[m_id] = int(p_arr[idx])
-                        statuses[m_id] = "🟢 Достоверно"
-                        is_alive[m_id] = True
-                        server_matrix[m_id][d["id"]] = "🟢"
+                        try:
+                            val = p_arr[idx]
+                            if val is not None:
+                                probs[m_id] = int(val)
+                                statuses[m_id] = "🟢 Достоверно"
+                                is_alive[m_id] = True
+                                server_matrix[m_id][d["id"]] = "🟢"
+                            else:
+                                statuses[m_id] = "🔴 Значение в JSON равно null"
+                        except (ValueError, TypeError):
+                            statuses[m_id] = "🔴 Некорректный формат числа"
                     else:
                         statuses[m_id] = "🔴 Ошибка диапазона индексов"
                 else:
