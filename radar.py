@@ -5,7 +5,7 @@ from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Серверная архитектура: Исправленный пакетный контур (Синхронизация UTC+5)")
+st.subheader("Серверная архитектура: Проверенный пакетный контур (Синхронизация UTC+5)")
 
 # --- ЗАЩИЩЕННЫЙ СБОРЩИК БАЗОВОГО ЭНДПОИНТА ---
 SUB_PREFIX = "a" + "p" + "i"
@@ -35,7 +35,7 @@ BASE_WEIGHTS = {m: 1.0 / len(ALL_MODELS) for m in ALL_MODELS}
 HEADERS = {"User-Agent": "Mozilla/5.0 RadarUfa/1.0", "Accept": "application/json"}
 
 def fetch_district_packet(lat, lon):
-    """Запрашивает все 8 моделей за один раз. Добавлен past_days=1 для исправления ошибки 400"""
+    """Запрашивает все 8 моделей за один раз с параметром past_days=1"""
     models_csv = ",".join(OM_MAPPING.values())
     url = f"{VALID_OPEN_METEO_URL}?latitude={lat}&longitude={lon}&hourly=precipitation_probability&models={models_csv}&past_days=1&forecast_days=1&timezone=auto"
     
@@ -51,9 +51,8 @@ def build_radar_intelligence():
     forecast_results = []
     server_matrix = {m: {d["id"]: "🔴" for d in DISTRICT_COORDS} for m in ALL_MODELS}
     
-    # Синхронизация часового индекса
+    # Синхронизация часового индекса с учетом вчерашних суток (+24 часа)
     current_hour = datetime.now().hour
-    # Так как мы добавили past_days=1 (24 часа вчерашнего дня), текущий час смещается ровно на 24 позиции вперед
     target_index = 24 + current_hour
     
     for d in DISTRICT_COORDS:
@@ -73,7 +72,7 @@ def build_radar_intelligence():
                     is_alive[m_id] = True
                     server_matrix[m_id][d["id"]] = "🟢"
                 else:
-                    statuses[m_id] = f"🔴 Ошибка смещения индексов (доступно точек: {len(p_arr)})"
+                    statuses[m_id] = f"🔴 Ошибка индексов (точек: {len(p_arr)})"
         else:
             for m_id in ALL_MODELS:
                 statuses[m_id] = msg
@@ -112,7 +111,8 @@ def style_d(feat):
     name = feat.get("properties", {}).get("name", "").strip()
     if name and "район" not in name.lower(): name = name + " район"
     p = r_dict.get(name, 0)
-    color = "#1d4ed8" if p > 75 else ("#3b82f6" if p > 45 else ("#facc15" if p > 15 else "#16a34a")))
+    # Корректный тернарный оператор без лишних символов
+    color = "#1d4ed8" if p > 75 else ("#3b82f6" if p > 45 else ("#facc15" if p > 15 else "#16a34a"))
     return {"fillColor": color, "color": "#0f172a", "weight": 2.5, "fillOpacity": 0.3}
 
 folium.GeoJson(ufa_geo, style_function=style_d, tooltip=folium.GeoJsonTooltip(fields=["name"])).add_to(m)
