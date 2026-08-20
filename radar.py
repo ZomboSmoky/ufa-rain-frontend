@@ -5,7 +5,7 @@ from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Радар Уфы", layout="wide", page_icon="🌧️")
 st.title("🌧️ Микролокальный погодный радар Уфы")
-st.subheader("Серверная архитектура: Оптимизированный контур с фильтрацией пустых данных")
+st.subheader("Серверная архитектура: Оптимизированный контур с подключенным ядром Yr.no")
 
 # --- ЗАЩИЩЕННЫЙ СБОРЩИК БАЗОВОГО ЭНДПОИНТА ---
 SUB_PREFIX = "a" + "p" + "i"
@@ -41,6 +41,7 @@ def get_model_url(lat, lon, model_key):
     elif model_key == "jma":
         return f"{base}&hourly=precipitation&models=jma_seamless&forecast_days=1"
     elif model_key == "yr_no":
+        # Модель Yr.no инициализируется строго от 2 дней прогноза
         return f"{base}&hourly=precipitation_probability&models=yr_yr&forecast_days=2"
     return base
 
@@ -74,7 +75,7 @@ def build_radar_intelligence():
                 matching_keys = [k for k in hourly_data.keys() if "precipitation" in k]
                 
                 if matching_keys:
-                    # ИСПРАВЛЕНО И ПРОВЕРЕНО: Извлекаем строго строковый ключ (первый элемент списка)
+                    # ВЕРИФИЦИРОВАНО: Извлекаем первый строковый элемент из списка совпадений
                     target_key = matching_keys[0]
                     p_arr = hourly_data.get(target_key, [])
                     
@@ -82,7 +83,7 @@ def build_radar_intelligence():
                         try:
                             val = p_arr[current_hour]
                             if val is not None:
-                                if target_key == "precipitation" and not "probability" in target_key:
+                                if "precipitation" in target_key and not "probability" in target_key:
                                     probs[m_id] = 100 if float(val) > 0.1 else 0
                                 else:
                                     probs[m_id] = int(val)
@@ -106,16 +107,16 @@ def build_radar_intelligence():
         
         if not live_models:
             final_p = None
-            for m in ALL_MODELS: src_disp[m] = f"Прогноз: Данные отсутствуют | Вес: 0.0% | Статус: {statuses[m]}"
+            for m in ALL_MODELS: src_disp[m] = f"Прогноз: Данные отсутствуют | Вес: 0.0% | Status: {statuses[m]}"
         else:
             sum_base_w = sum(BASE_WEIGHTS[m] for m in live_models)
             final_p = min(max(int(sum((BASE_WEIGHTS[m] / sum_base_w) * probs[m] for m in live_models)), 0), 100)
             for m in ALL_MODELS:
                 if is_alive[m]:
                     calc_w = round((BASE_WEIGHTS[m] / sum_base_w * 100), 1)
-                    src_disp[m] = f"Прогноз: {probs[m]}% | Вес: {calc_w}% | Статус: {statuses[m]}"
+                    src_disp[m] = f"Прогноз: {probs[m]}% | Вес: {calc_w}% | Status: {statuses[m]}"
                 else:
-                    src_disp[m] = f"Прогноз: 0% | Вес: 0.0% | Статус: {statuses[m]}"
+                    src_disp[m] = f"Прогноз: 0% | Вес: 0.0% | Status: {statuses[m]}"
                     
         forecast_results.append({"name": d["name"], "center": d["center"], "prob": final_p, "src": src_disp})
         
@@ -134,7 +135,6 @@ m = folium.Map(location=[54.745, 55.960], zoom_start=11, tiles="OpenStreetMap")
 def style_d(feat):
     name = feat.get("properties", {}).get("name", "").strip()
     if name and "район" not in name.lower(): name = name + " район"
-    
     p = r_dict.get(name, None)
     
     if p is None:
