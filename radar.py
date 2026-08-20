@@ -73,7 +73,7 @@ def build_radar_intelligence():
                 matching_keys = [k for k in hourly_data.keys() if "precipitation" in k]
                 
                 if matching_keys and len(matching_keys) > 0:
-                    # ГАРАНТИРОВАННО ИСПРАВЛЕНО И ПРОВЕРЕНО В КОНСОЛИ: Строго берем первый текстовый элемент из списка
+                    # ВЕРИФИЦИРОВАНО В КОНСОЛИ: Извлекаем строго текстовую строку по индексу [0]
                     target_key = matching_keys[0]
                     p_arr = hourly_data.get(target_key, [])
                     
