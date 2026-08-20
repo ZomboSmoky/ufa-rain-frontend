@@ -241,13 +241,12 @@ with st.spinner("⚡ Сканирование атмосферных парам�
     fdata, matrix_data = build_radar_intelligence()
 r_dict = {dist["name"]: dist["prob"] for dist in fdata}
 
-# 🎨 1. РЕНДЕРИНГ INSTAGRAM STORIES (ТОП ПАНЕЛЬ С ИКОНКАМИ ПОГОДЫ)
-stories_html = '<div class="stories-feed">'
+# 🎨 1. ИСПРАВЛЕННЫЙ МОНОЛИТНЫЙ РЕНДЕРИНГ STORIES (СТРОГО ОДНА СТРОКА)
+stories_elements = []
 for dist in fdata:
     p = dist["prob"]
     p_text = "—" if p is None else f"{p}%"
     
-    # ИСПРАВЛЕНО: Списки кодов WMO преобразованы в явные кортежи
     code = dist["wmo"]
     if code == 0: emoji = "☀️"
     elif code in (1, 2): emoji = "🌤️"
@@ -261,19 +260,22 @@ for dist in fdata:
         
     ring_class = "ring-dry" if (p is None or p < 15) else ("ring-warning" if p < 45 else "ring-danger")
     
-    stories_html += f"""
+    card_html = f"""
     <div class="story-card">
         <div class="story-ring {ring_class}">
             <div class="story-body">
-                <span class="story-emoji">{emoji}</span>
-                <span class="story-pct">{p_text}</span>
+                <div class="story-emoji">{emoji}</div>
+                <div class="story-pct">{p_text}</div>
             </div>
         </div>
         <div class="story-label">{dist['id']}</div>
     </div>
     """
-stories_html += '</div>'
-st.markdown(stories_html, unsafe_allow_html=True)
+    stories_elements.append(card_html.strip())
+
+# Все элементы склеиваются в единый безопасный div без разрывов
+full_feed_html = f'<div class="stories-feed">{"".join(stories_elements)}</div>'
+st.markdown(full_feed_html, unsafe_allow_html=True)
 st.markdown("<br>", unsafe_allow_html=True)
 
 # --- 2. ОТРИСОВКА ИНТЕРАКТИВНОЙ КАРТЫ FOLIUM ---
@@ -297,7 +299,7 @@ for dist in fdata:
 
 st_folium(m, width=950, height=480, key="ufa_instagram_radar_v2_premium")
 
-# 🎨 3. РЕНДЕРИНГ INSTAGRAM-ПОСТОВ (АНАЛИТИЧЕСКАЯ СВОДКА С ПОЛНЫМ НАБОРОМ ДАННЫХ)
+# 🎨 3. РЕНДЕРИНГ INSTAGRAM-ПОСТОВ
 st.markdown("### 📱 Лента публикаций по районам")
 posts_html = '<div class="insta-grid">'
 for dist in fdata:
