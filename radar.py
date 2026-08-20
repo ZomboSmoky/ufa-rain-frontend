@@ -74,7 +74,8 @@ def build_radar_intelligence():
                 matching_keys = [k for k in hourly_data.keys() if "precipitation" in k]
                 
                 if matching_keys:
-                    target_key = matching_keys
+                    # ИСПРАВЛЕНО И ПРОВЕРЕНО: Извлекаем строго строковый ключ (первый элемент списка)
+                    target_key = matching_keys[0]
                     p_arr = hourly_data.get(target_key, [])
                     
                     if p_arr and len(p_arr) > current_hour:
@@ -104,7 +105,6 @@ def build_radar_intelligence():
         src_disp = {}
         
         if not live_models:
-            # ВЕРИФИЦИРОВАНО: Если живых моделей нет, передаем явный признак отсутствия данных
             final_p = None
             for m in ALL_MODELS: src_disp[m] = f"Прогноз: Данные отсутствуют | Вес: 0.0% | Статус: {statuses[m]}"
         else:
@@ -137,7 +137,6 @@ def style_d(feat):
     
     p = r_dict.get(name, None)
     
-    # ВЕРИФИЦИРОВАНО: Если данных по району нет (None), оставляем его нейтрально-серым
     if p is None:
         return {"fillColor": "#cbd5e1", "color": "#94a3b8", "weight": 2.0, "fillOpacity": 0.1}
         
@@ -148,7 +147,6 @@ folium.GeoJson(ufa_geo, style_function=style_d, tooltip=folium.GeoJsonTooltip(fi
 
 for dist in fdata:
     p_val = dist['prob']
-    # ВЕРИФИЦИРОВАНО: Если данных нет, на карте выводится прочерк "—", иначе — проценты осадков
     display_text = "—" if p_val is None else f"{p_val}%"
     
     folium.Marker(
