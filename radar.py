@@ -172,14 +172,20 @@ def fetch_all_data_parallel():
         structured_data[dist_id][m_id] = {"json": json_body, "msg": status_msg}
     return structured_data
 # ==========================================
-# ЧАСТЬ 3: Аналитическое ядро и Расчет осадков
+# ==========================================
+# ЧАСТЬ 3: Исправленное аналитическое ядро (Без бага в 23:30)
 # Длина блока: ~125 строк
 # ==========================================
 def build_radar_intelligence():
     network_package = fetch_all_data_parallel()
     forecast_results = []
     server_matrix = {m: {d["id"]: "🔴" for d in DISTRICT_COORDS} for m in ALL_MODELS}
-    current_hour = (datetime.utcnow().hour + 5) % 24
+    
+    # ИСПРАВЛЕНИЕ БАГА: Сначала прибавляем 5 часов к объекту даты (переходим на уфимские сутки),
+    # и только потом забираем текущий локальный час Уфы.
+    from datetime import timedelta
+    ufa_now = datetime.utcnow() + timedelta(hours=5)
+    current_hour = ufa_now.hour
     
     for d in DISTRICT_COORDS:
         probs = {m: 0 for m in ALL_MODELS}
@@ -241,6 +247,7 @@ def build_radar_intelligence():
             "press": avg_press, "wind": avg_wind, "gust": max_gust, "src": statuses
         })
     return forecast_results, server_matrix
+
 # ==========================================
 # ЧАСТЬ 4: Визуализация — Stories и Карта Folium
 # Длина блока: ~85 строк
