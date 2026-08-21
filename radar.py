@@ -173,22 +173,22 @@ def fetch_all_data_parallel():
     return structured_data
 # ==========================================
 # ==========================================
-# ЧАСТЬ 3: Исправленное аналитическое ядро (Без бага в 23:30)
-# Длина блока: ~125 строк
+# ЧАСТЬ 3: Модернизированное аналитическое ядро с расчетом 6-часового тренда
+# Длина блока: ~135 строк
 # ==========================================
 def build_radar_intelligence():
     network_package = fetch_all_data_parallel()
     forecast_results = []
     server_matrix = {m: {d["id"]: "🔴" for d in DISTRICT_COORDS} for m in ALL_MODELS}
     
-    # ИСПРАВЛЕНИЕ БАГА: Сначала прибавляем 5 часов к объекту даты (переходим на уфимские сутки),
-    # и только потом забираем текущий локальный час Уфы.
     from datetime import timedelta
     ufa_now = datetime.utcnow() + timedelta(hours=5)
     current_hour = ufa_now.hour
     
     for d in DISTRICT_COORDS:
         probs = {m: 0 for m in ALL_MODELS}
+        # Инициализируем почасовые матрицы для тренда (6 часов вперед)
+        hourly_trend_matrix = {m: [0]*6 for m in ALL_MODELS}
         statuses = {m: "🔴 Нет данных" for m in ALL_MODELS}
         is_alive = {m: False for m in ALL_MODELS}
         
@@ -214,6 +214,7 @@ def build_radar_intelligence():
                         if hourly_data["wind_speed_10m"][idx] is not None: winds.append(float(hourly_data["wind_speed_10m"][idx]))
                         if hourly_data["wind_gusts_10m"][idx] is not None: gusts.append(float(hourly_data["wind_gusts_10m"][idx]))
                     except (IndexError, TypeError, ValueError): pass
+                
                 if isinstance(matching_keys, list) and len(matching_keys) > 0:
                     prob_keys = [k for k in matching_keys if "probability" in k]
                     target_key = next(iter(prob_keys)) if prob_keys else next(iter(matching_keys))
@@ -221,18 +222,42 @@ def build_radar_intelligence():
                     
                     if p_arr and len(p_arr) > idx:
                         try:
+                            # 1. Извлекаем значение для текущего часа
                             val = p_arr[idx]
                             if val is not None:
-                                if "precipitation" in target_key and not "probability" in target_key:
+                                if "precipitation" in target_key and "probability" not in target_key:
                                     probs[m_id] = 100 if float(val) > 0.1 else 0
                                 else: probs[m_id] = int(val)
+                                
                                 statuses[m_id] = "🟢 Достоверно"
                                 is_alive[m_id] = True
                                 server_matrix[m_id][d["id"]] = "🟢"
+                            
+                            # 2. Собираем тренд на 6 часов вперед с защитой от выхода за границы массива
+                            for h_offset in range(6):
+                                t_idx = idx + h_offset
+                                if t_idx < len(p_arr) and p_arr[t_idx] is not None:
+                                    t_val = p_arr[t_idx]
+                                    if "precipitation" in target_key and "probability" not in target_key:
+                                        hourly_trend_matrix[m_id][h_offset] = 100 if float(t_val) > 0.1 else 0
+                                    else:
+                                        hourly_trend_matrix[m_id][h_offset] = int(t_val)
                         except (ValueError, TypeError): pass
             else: statuses[m_id] = msg
+            
         live_models = [m for m in ALL_MODELS if is_alive[m]]
+        
+        # Расчет финальной текущей вероятности
         final_p = min(max(int(sum((BASE_WEIGHTS[m] / sum(BASE_WEIGHTS[lm] for lm in live_models)) * probs[m] for m in live_models)), 0), 100) if live_models else None
+        
+        # Интеграция и взвешивание 6-часового тренда по доступным моделям
+        aggregated_trend = []
+        for h_offset in range(6):
+            if live_models:
+                step_p = int(sum((BASE_WEIGHTS[m] / sum(BASE_WEIGHTS[lm] for lm in live_models)) * hourly_trend_matrix[m][h_offset] for m in live_models))
+                aggregated_trend.append(min(max(step_p, 0), 100))
+            else:
+                aggregated_trend.append(0)
         
         avg_temp = round(sum(temps)/len(temps), 1) if temps else 0
         avg_feel = round(sum(feels)/len(feels), 1) if feels else 0
@@ -241,8 +266,10 @@ def build_radar_intelligence():
         avg_press = round((sum(pressures)/len(pressures)) * 0.75006) if pressures else 750
         avg_wind = round((sum(winds)/len(winds)), 1) if winds else 0
         max_gust = round(max(gusts), 1) if gusts else 0
+        
         forecast_results.append({
             "id": d["id"], "name": d["name"], "center": d["center"], "prob": final_p,
+            "trend": aggregated_trend, "current_hour": current_hour,
             "temp": avg_temp, "feel": avg_feel, "wmo": final_wmo, "hum": avg_hum,
             "press": avg_press, "wind": avg_wind, "gust": max_gust, "src": statuses
         })
@@ -304,8 +331,8 @@ for dist in fdata:
     folium.Marker(location=dist["center"], icon=folium.DivIcon(icon_size=(60, 40), icon_anchor=(30, 20), html=f"""<div style="font-family: 'Segoe UI', Arial, sans-serif; font-size: 14px; font-weight: 900; color: #0f172a; text-shadow: 2px 2px 0px #fff, -2px -2px 0px #fff; text-align: center; width: 100%;">{display_text}</div>""")).add_to(m)
 st_folium(m, width=950, height=480, key="ufa_instagram_radar_v2_premium")
 # ==========================================
-# ЧАСТЬ 5: Лента публикаций (Grid) и Highlights
-# Длина блока: ~50 строк
+# ЧАСТЬ 5: Лента публикаций (Grid) с отображением шкалы тренда осадков
+# Длина блока: ~75 строк
 # ==========================================
 st.markdown("### 📱 Лента публикаций по районам")
 posts_elements = []
@@ -320,7 +347,36 @@ for dist in fdata:
     elif code in (71, 73, 75, 77, 85, 86): emoji = "🌨️"
     elif code in (95, 96, 99): emoji = "⛈️"
     else: emoji = "☁️"
+    
     gust_alert = "⚠️ Внимание: сильные порывы ветра!" if dist["gust"] > 11.0 else "Потоки ветра стабильны"
+    
+    # Сборка HTML-компонента для 6-часового тренда в стиле сторис/индикаторов
+    trend_html_items = []
+    start_h = dist["current_hour"]
+    for offset, t_prob in enumerate(dist["trend"]):
+        display_hour = (start_h + offset) % 24
+        # Подбираем цвет индикатора в зависимости от критичности вероятности дождя
+        bar_color = "#16a34a" if t_prob < 15 else ("#facc15" if t_prob < 45 else "#dc2743")
+        item_html = f"""
+        <div style="display: flex; flex-direction: column; align-items: center; font-size: 11px; flex: 1;">
+            <span style="color: #8e8e8e; font-weight: 600; margin-bottom: 2px;">{display_hour:02d}:00</span>
+            <div style="width: 100%; background-color: #f1f5f9; height: 5px; border-radius: 3px; overflow: hidden; min-width: 35px;">
+                <div style="background-color: {bar_color}; width: {t_prob}%; height: 100%;"></div>
+            </div>
+            <span style="font-weight: 700; color: #262626; margin-top: 2px;">{t_prob}%</span>
+        </div>
+        """
+        trend_html_items.append(item_html.strip())
+        
+    trend_container = f"""
+    <div style="margin-top: 12px; border-top: 1px solid #efefef; padding-top: 10px;">
+        <div style="font-weight: 700; font-size: 12px; color: #262626; margin-bottom: 8px;">📈 Тренд осадков (ближайшие 6 часов):</div>
+        <div style="display: flex; gap: 8px; justify-content: space-between;">
+            {"".join(trend_html_items)}
+        </div>
+    </div>
+    """
+
     single_post_html = f"""
     <div class="insta-post">
         <div class="post-header"><div class="post-avatar">{dist['id'][:2]}</div><div class="post-username">{dist['name']}</div></div>
@@ -332,6 +388,7 @@ for dist in fdata:
                 <div>💨 <b>Ветер:</b> {dist['wind']} м/с (порывы до {dist['gust']} м/с)</div>
                 <div style="font-size: 11px; color: #8e8e8e; margin-top: 6px; font-weight: 600;">{gust_alert}</div>
             </div>
+            {trend_container}
         </div>
     </div>
     """
@@ -340,7 +397,7 @@ st.markdown(f'<div class="insta-grid">{"".join(posts_elements)}</div>', unsafe_a
 st.markdown("<br><br>", unsafe_allow_html=True)
 
 # --- 4. HIGHLIGHTS (МАТРИЦА СЕРВЕРОВ) ---
-st.markdown("### 🗂️ Актуальное (Highlights) — Состояние системных ядра")
+st.markdown("### 🗂️ Актуальное (Highlights) — Состояние системных ядер")
 h_cols = st.columns(len(ALL_MODELS))
 for i, m_id in enumerate(ALL_MODELS):
     m_statuses = matrix_data.get(m_id, {})
