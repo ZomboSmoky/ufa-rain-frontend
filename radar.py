@@ -118,9 +118,6 @@ st.markdown(INSTAGRAM_STYLE, unsafe_allow_html=True)
 st.title("📸 WeatherGram Ufa")
 st.caption("Полнофункциональный погодный инстаграм-глянец радара Уфы")
 
-SUB_PREFIX, BASE_DOMAIN = "api", "open-meteo.com"
-VALID_OPEN_METEO_URL = f"https://{SUB_PREFIX}.{BASE_DOMAIN}/v1/forecast"
-
 DISTRICT_COORDS = [
     {"id": "Дем", "name": "Дёмский район", "lat": 54.693, "lon": 55.811, "center": [54.685, 55.820]},
     {"id": "Kал", "name": "Калининский район", "lat": 54.831, "lon": 56.126, "center": [54.810, 56.120]},
@@ -135,17 +132,23 @@ ALL_MODELS = ["ecmwf", "gfs", "icon", "jma"]
 BASE_WEIGHTS = {m: 1.0 / len(ALL_MODELS) for m in ALL_MODELS}
 HEADERS = {"User-Agent": "Mozilla/5.0 RadarUfa/1.0", "Accept": "application/json"}
 # ==========================================
-# ЧАСТЬ 2: Сетевые запросы и Асинхронный воркер
-# Длина блока: ~60 строк
+# ЧАСТЬ 2: Маршрутизация запросов к API (Фикс JMA)
+# Длина блока: ~65 строк
 # ==========================================
 def get_model_url(lat, lon, model_key):
-    # Запрашиваем 2 дня, чтобы гарантированно перекрыть стыки дат по UTC и уфимскому времени
-    base = f"{VALID_OPEN_METEO_URL}?latitude={lat}&longitude={lon}&timezone=UTC&forecast_days=2&hourly=temperature_2m,apparent_temperature,weather_code,relative_humidity_2m,surface_pressure,wind_speed_10m,wind_gusts_10m"
-    if model_key == "ecmwf": return f"{base},precipitation_probability&models=ecmwf_ifs"
-    elif model_key == "gfs": return f"{base},precipitation_probability&models=gfs_seamless"
-    elif model_key == "icon": return f"{base},precipitation_probability&models=icon_seamless"
-    elif model_key == "jma": return f"{base},precipitation,precipitation_probability&models=jma_seamless"
-    return base
+    # Базовый набор запрашиваемых параметров
+    params = f"latitude={lat}&longitude={lon}&timezone=UTC&forecast_days=2&hourly=temperature_2m,apparent_temperature,weather_code,relative_humidity_2m,surface_pressure,wind_speed_10m,wind_gusts_10m"
+    
+    # ФИКС: Для модели JMA используется выделенный эндпоинт v1/jma, не поддерживающий precipitation_probability
+    if model_key == "jma":
+        return f"https://open-meteo.com?{params},precipitation"
+        
+    # Остальные глобальные модели работают через стандартную точку прогноза v1/forecast
+    base_url = "https://api.open-meteo.com/v1/forecast"
+    if model_key == "ecmwf": return f"{base_url}?{params},precipitation_probability&models=ecmwf_ifs"
+    elif model_key == "gfs": return f"{base_url}?{params},precipitation_probability&models=gfs_seamless"
+    elif model_key == "icon": return f"{base_url}?{params},precipitation_probability&models=icon_seamless"
+    return f"{base_url}?{params}"
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_single_api_node(url):
@@ -177,7 +180,7 @@ def fetch_all_data_parallel():
         structured_data[dist_id][m_id] = {"json": json_body, "msg": status_msg}
     return structured_data
 # ==========================================
-# ЧАСТЬ 3: Аналитическая матрица и расчет индекса часа
+# ЧАСТЬ 3: Аналитическая обработка ответов
 # Длина блока: ~125 строк
 # ==========================================
 def build_radar_intelligence():
@@ -185,9 +188,8 @@ def build_radar_intelligence():
     forecast_results = []
     server_matrix = {m: {d["id"]: "🔴" for d in DISTRICT_COORDS} for m in ALL_MODELS}
     
-    # 1. Рассчитываем точное текущее время в Уфе (UTC+5), сбрасывая минуты
+    # Вычисляем текущий час по Уфе (UTC+5), а затем переводим в UTC для сверки с API
     ufa_now = datetime.utcnow() + timedelta(hours=5)
-    # 2. Переводим его обратно в UTC-строку для сопоставления с ответом API Open-Meteo
     target_utc_time = ufa_now - timedelta(hours=5)
     target_hour_str = target_utc_time.strftime("%Y-%m-%dT%H:00")
     
@@ -207,12 +209,10 @@ def build_radar_intelligence():
                 hourly_data = js["hourly"]
                 time_arr = hourly_data.get("time", [])
                 
-                # Поиск точного индекса часа по строковой метке UTC
                 idx = -1
                 if target_hour_str in time_arr:
                     idx = time_arr.index(target_hour_str)
                 else:
-                    # Фолбэк на базовый час UTC, если временные метки съехали
                     idx = datetime.utcnow().hour
                 
                 if idx != -1 and idx < len(time_arr):
@@ -233,11 +233,10 @@ def build_radar_intelligence():
                             gusts.append(float(hourly_data["wind_gusts_10m"][idx]))
                     except (IndexError, TypeError, ValueError): pass
                 
-                # Обработка осадков и вероятностей (с фиксом для JMA)
+                # Поиск ключей осадков
                 matching_keys = [k for k in hourly_data.keys() if "precipitation" in k]
                 if matching_keys:
                     prob_keys = [k for k in matching_keys if "probability" in k]
-                    # Если есть вероятность — берем её, иначе берем массив интенсивности (precipitation)
                     target_key = next(iter(prob_keys)) if prob_keys else next(iter(matching_keys))
                     p_arr = hourly_data.get(target_key, [])
                     
@@ -245,7 +244,7 @@ def build_radar_intelligence():
                         try:
                             val = p_arr[idx]
                             if val is not None:
-                                # Исправление для JMA: если это чистые мм осадков, конвертируем в вероятность
+                                # Если модель отдала интенсивность осадков в мм (как JMA) — преобразуем в вероятность
                                 if "precipitation" in target_key and "probability" not in target_key:
                                     probs[m_id] = 100 if float(val) > 0.1 else 0
                                 else: 
