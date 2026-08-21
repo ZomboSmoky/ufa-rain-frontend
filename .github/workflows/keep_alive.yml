@@ -1,0 +1,30 @@
+name: Streamlit Keep Alive Anti-Sleep
+
+name: Streamlit Keep Alive Anti-Sleep
+
+on:
+  schedule:
+    # ИСПРАВЛЕНО: запуск каждые 6 часов (00:00, 06:00, 12:00, 18:00 UTC)
+    - cron: '0 */6 * * *'
+  # Позволяет запустить пинг вручную кнопкой из вкладки Actions на GitHub
+  workflow_dispatch:
+
+
+jobs:
+  ping_server:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Ping Request to Streamlit App
+        run: |
+          # ВНИМАНИЕ: Замените URL ниже на реальную ссылку вашего опубликованного сайта Streamlit!
+          curl -s -I "https://streamlit.app" | head -n 1
+
+
+jobs:
+  ping_server:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Ping Request to Streamlit App
+        run: |
+          # ВНИМАНИЕ: Замените URL ниже на реальную ссылку вашего опубликованного сайта Streamlit!
+          curl -s -I "https://streamlit.app" | head -n 1
