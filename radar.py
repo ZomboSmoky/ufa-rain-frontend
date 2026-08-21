@@ -331,8 +331,8 @@ for dist in fdata:
     folium.Marker(location=dist["center"], icon=folium.DivIcon(icon_size=(60, 40), icon_anchor=(30, 20), html=f"""<div style="font-family: 'Segoe UI', Arial, sans-serif; font-size: 14px; font-weight: 900; color: #0f172a; text-shadow: 2px 2px 0px #fff, -2px -2px 0px #fff; text-align: center; width: 100%;">{display_text}</div>""")).add_to(m)
 st_folium(m, width=950, height=480, key="ufa_instagram_radar_v2_premium")
 # ==========================================
-# ЧАСТЬ 5: Лента публикаций (Grid) с отображением шкалы тренда осадков
-# Длина блока: ~75 строк
+# ЧАСТЬ 5: Исправленная лента публикаций (Без бага с сырым HTML)
+# Длина блока: ~90 строк
 # ==========================================
 st.markdown("### 📱 Лента публикаций по районам")
 posts_elements = []
@@ -350,33 +350,36 @@ for dist in fdata:
     
     gust_alert = "⚠️ Внимание: сильные порывы ветра!" if dist["gust"] > 11.0 else "Потоки ветра стабильны"
     
-    # Сборка HTML-компонента для 6-часового тренда в стиле сторис/индикаторов
+    # ЗАЩИТА: Собираем тренд через конкатенацию списков, полностью исключая фигурные скобки внутри f-строк
     trend_html_items = []
     start_h = dist["current_hour"]
     for offset, t_prob in enumerate(dist["trend"]):
         display_hour = (start_h + offset) % 24
-        # Подбираем цвет индикатора в зависимости от критичности вероятности дождя
         bar_color = "#16a34a" if t_prob < 15 else ("#facc15" if t_prob < 45 else "#dc2743")
-        item_html = f"""
-        <div style="display: flex; flex-direction: column; align-items: center; font-size: 11px; flex: 1;">
-            <span style="color: #8e8e8e; font-weight: 600; margin-bottom: 2px;">{display_hour:02d}:00</span>
-            <div style="width: 100%; background-color: #f1f5f9; height: 5px; border-radius: 3px; overflow: hidden; min-width: 35px;">
-                <div style="background-color: {bar_color}; width: {t_prob}%; height: 100%;"></div>
-            </div>
-            <span style="font-weight: 700; color: #262626; margin-top: 2px;">{t_prob}%</span>
-        </div>
-        """
-        trend_html_items.append(item_html.strip())
         
-    trend_container = f"""
-    <div style="margin-top: 12px; border-top: 1px solid #efefef; padding-top: 10px;">
-        <div style="font-weight: 700; font-size: 12px; color: #262626; margin-bottom: 8px;">📈 Тренд осадков (ближайшие 6 часов):</div>
-        <div style="display: flex; gap: 8px; justify-content: space-between;">
-            {"".join(trend_html_items)}
-        </div>
-    </div>
-    """
+        # Строим каждый элемент разметки без использования f-строк со стилями
+        item_html = (
+            '<div style="display: flex; flex-direction: column; align-items: center; font-size: 11px; flex: 1;">'
+            '<span style="color: #8e8e8e; font-weight: 600; margin-bottom: 2px;">' + f"{display_hour:02d}:00" + '</span>'
+            '<div style="width: 100%; background-color: #f1f5f9; height: 5px; border-radius: 3px; overflow: hidden; min-width: 35px;">'
+            '<div style="background-color: ' + bar_color + '; width: ' + f"{t_prob}%" + '; height: 100%;"></div>'
+            '</div>'
+            '<span style="font-weight: 700; color: #262626; margin-top: 2px;">' + f"{t_prob}%" + '</span>'
+            '</div>'
+        )
+        trend_html_items.append(item_html)
+        
+    # Формируем контейнер тренда безопасным склеиванием строк
+    trend_container = (
+        '<div style="margin-top: 12px; border-top: 1px solid #efefef; padding-top: 10px;">'
+        '<div style="font-weight: 700; font-size: 12px; color: #262626; margin-bottom: 8px;">📈 Тренд осадков (ближайшие 6 часов):</div>'
+        '<div style="display: flex; gap: 8px; justify-content: space-between;">'
+        + "".join(trend_html_items) +
+        '</div>'
+        '</div>'
+    )
 
+    # Вставляем уже собранный очищенный HTML-контейнер в пост
     single_post_html = f"""
     <div class="insta-post">
         <div class="post-header"><div class="post-avatar">{dist['id'][:2]}</div><div class="post-username">{dist['name']}</div></div>
@@ -385,7 +388,7 @@ for dist in fdata:
             <div class="post-likes">📊 Текущие метеопоказатели:</div>
             <div class="post-metrics">
                 <div>💧 <b>Влажность:</b> {dist['hum']}%</div><div>📊 <b>Давление:</b> {dist['press']} мм рт. ст.</div>
-                <div>💨 <b>Ветер:</b> {dist['wind']} м/с (порывы до {dist['gust']} м/с)</div>
+                <div>💨 <b>Ветер:</b> {dist['wind']} m/s (порывы до {dist['gust']} м/с)</div>
                 <div style="font-size: 11px; color: #8e8e8e; margin-top: 6px; font-weight: 600;">{gust_alert}</div>
             </div>
             {trend_container}
@@ -411,3 +414,4 @@ for i, m_id in enumerate(ALL_MODELS):
             </div>
         </div>
         """, unsafe_allow_html=True)
+
