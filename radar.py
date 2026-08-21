@@ -6,8 +6,7 @@ import streamlit as st
 import requests
 import folium
 import json
-from datetime import datetime, timedelta
-from urllib.parse import urlencode, urljoin
+from datetime import datetime
 from streamlit_folium import st_folium
 from concurrent.futures import ThreadPoolExecutor
 
@@ -119,6 +118,9 @@ st.markdown(INSTAGRAM_STYLE, unsafe_allow_html=True)
 st.title("📸 WeatherGram Ufa")
 st.caption("Полнофункциональный погодный инстаграм-глянец радара Уфы")
 
+SUB_PREFIX, BASE_DOMAIN = "api", "open-meteo.com"
+VALID_OPEN_METEO_URL = f"https://{SUB_PREFIX}.{BASE_DOMAIN}/v1/forecast"
+
 DISTRICT_COORDS = [
     {"id": "Дем", "name": "Дёмский район", "lat": 54.693, "lon": 55.811, "center": [54.685, 55.820]},
     {"id": "Kал", "name": "Калининский район", "lat": 54.831, "lon": 56.126, "center": [54.810, 56.120]},
@@ -133,53 +135,24 @@ ALL_MODELS = ["ecmwf", "gfs", "icon", "jma"]
 BASE_WEIGHTS = {m: 1.0 / len(ALL_MODELS) for m in ALL_MODELS}
 HEADERS = {"User-Agent": "Mozilla/5.0 RadarUfa/1.0", "Accept": "application/json"}
 # ==========================================
-# ЧАСТЬ 2: Защищенный генератор URL (urllib)
-# Длина блока: ~65 строк
+# ЧАСТЬ 2: Генерация исходных URL и Сетевой воркер
+# Длина блока: ~60 строк
 # ==========================================
 def get_model_url(lat, lon, model_key):
-    base_params = {
-        "latitude": lat,
-        "longitude": lon,
-        "timezone": "UTC",
-        "forecast_days": 2,
-    }
-    
-    # Базовые почасовые метрики, запрашиваемые у всех ядер
-    hourly_metrics = [
-        "temperature_2m", "apparent_temperature", "weather_code",
-        "relative_humidity_2m", "surface_pressure", "wind_speed_10m", "wind_gusts_10m"
-    ]
-    
-    # Разделение логики точек доступа API и специфичных для моделей параметров
-    if model_key == "jma":
-        endpoint = "https://open-meteo.com"
-        hourly_metrics.append("precipitation")
-    else:
-        endpoint = "https://open-meteo.com"
-        hourly_metrics.append("precipitation_probability")
-        
-        if model_key == "ecmwf":
-            base_params["models"] = "ecmwf_ifs"
-        elif model_key == "gfs":
-            base_params["models"] = "gfs_seamless"
-        elif model_key == "icon":
-            base_params["models"] = "icon_seamless"
-            
-    base_params["hourly"] = ",".join(hourly_metrics)
-    
-    # ЗАЩИТА: Безопасная сборка URL-строки через urlencode без ручной конкатенации
-    query_string = urlencode(base_params)
-    return f"{endpoint}?{query_string}"
+    base = f"{VALID_OPEN_METEO_URL}?latitude={lat}&longitude={lon}&timezone=auto&hourly=temperature_2m,apparent_temperature,weather_code,relative_humidity_2m,surface_pressure,wind_speed_10m,wind_gusts_10m"
+    if model_key == "ecmwf": return f"{base},precipitation_probability&models=ecmwf_ifs&forecast_days=1"
+    elif model_key == "gfs": return f"{base},precipitation_probability&models=gfs_seamless&forecast_days=1"
+    elif model_key == "icon": return f"{base},precipitation_probability&models=icon_seamless&forecast_days=1"
+    elif model_key == "jma": return f"{base},precipitation&models=jma_seamless&forecast_days=1"
+    return base
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_single_api_node(url):
     try:
-        res = requests.get(url, headers=HEADERS, timeout=7.0)
-        if res.status_code == 200 and res.text.strip(): 
-            return res.json(), "🟢 Достоверно"
+        res = requests.get(url, headers=HEADERS, timeout=5.0)
+        if res.status_code == 200 and res.text.strip(): return res.json(), "🟢 Достоверно"
         return None, f"🔴 Ошибка HTTP {res.status_code}"
-    except Exception: 
-        return None, "🔴 Ошибка сети"
+    except Exception: return None, "🔴 Ошибка сети"
 
 def fetch_url_worker(task):
     dist_id, m_id, url = task
@@ -189,30 +162,24 @@ def fetch_url_worker(task):
 def fetch_all_data_parallel():
     tasks = []
     for d in DISTRICT_COORDS:
-        for m in ALL_MODELS: 
-            tasks.append((d["id"], m, get_model_url(d["lat"], d["lon"], m)))
+        for m in ALL_MODELS: tasks.append((d["id"], m, get_model_url(d["lat"], d["lon"], m)))
     raw_responses = []
     with ThreadPoolExecutor(max_workers=16) as executor:
         results = executor.map(fetch_url_worker, tasks)
-        for r in results: 
-            raw_responses.append(r)
+        for r in results: raw_responses.append(r)
     structured_data = {d["id"]: {} for d in DISTRICT_COORDS}
     for dist_id, m_id, json_body, status_msg in raw_responses:
         structured_data[dist_id][m_id] = {"json": json_body, "msg": status_msg}
     return structured_data
 # ==========================================
-# ЧАСТЬ 3: Аналитическая обработка ответов
+# ЧАСТЬ 3: Аналитическое ядро и Расчет осадков
 # Длина блока: ~125 строк
 # ==========================================
 def build_radar_intelligence():
     network_package = fetch_all_data_parallel()
     forecast_results = []
     server_matrix = {m: {d["id"]: "🔴" for d in DISTRICT_COORDS} for m in ALL_MODELS}
-    
-    # Вычисляем текущий час по Уфе (UTC+5), а затем переводим в UTC для сверки с API
-    ufa_now = datetime.utcnow() + timedelta(hours=5)
-    target_utc_time = ufa_now - timedelta(hours=5)
-    target_hour_str = target_utc_time.strftime("%Y-%m-%dT%H:00")
+    current_hour = (datetime.utcnow().hour + 5) % 24
     
     for d in DISTRICT_COORDS:
         probs = {m: 0 for m in ALL_MODELS}
@@ -226,37 +193,22 @@ def build_radar_intelligence():
             node = dist_bundle.get(m_id, {"json": None, "msg": "🔴 Ошибка"})
             js, msg = node["json"], node["msg"]
             
-            if js and "hourly" in js:
-                hourly_data = js["hourly"]
-                time_arr = hourly_data.get("time", [])
-                
-                idx = -1
-                if target_hour_str in time_arr:
-                    idx = time_arr.index(target_hour_str)
-                else:
-                    idx = datetime.utcnow().hour
-                
-                if idx != -1 and idx < len(time_arr):
-                    try:
-                        if hourly_data.get("temperature_2m") and hourly_data["temperature_2m"][idx] is not None: 
-                            temps.append(float(hourly_data["temperature_2m"][idx]))
-                        if hourly_data.get("apparent_temperature") and hourly_data["apparent_temperature"][idx] is not None: 
-                            feels.append(float(hourly_data["apparent_temperature"][idx]))
-                        if hourly_data.get("weather_code") and hourly_data["weather_code"][idx] is not None: 
-                            wmos.append(int(hourly_data["weather_code"][idx]))
-                        if hourly_data.get("relative_humidity_2m") and hourly_data["relative_humidity_2m"][idx] is not None: 
-                            humidities.append(int(hourly_data["relative_humidity_2m"][idx]))
-                        if hourly_data.get("surface_pressure") and hourly_data["surface_pressure"][idx] is not None: 
-                            pressures.append(float(hourly_data["surface_pressure"][idx]))
-                        if hourly_data.get("wind_speed_10m") and hourly_data["wind_speed_10m"][idx] is not None: 
-                            winds.append(float(hourly_data["wind_speed_10m"][idx]))
-                        if hourly_data.get("wind_gusts_10m") and hourly_data["wind_gusts_10m"][idx] is not None: 
-                            gusts.append(float(hourly_data["wind_gusts_10m"][idx]))
-                    except (IndexError, TypeError, ValueError): pass
-                
-                # Поиск ключей осадков
+            if js:
+                hourly_data = js.get("hourly", {})
                 matching_keys = [k for k in hourly_data.keys() if "precipitation" in k]
-                if matching_keys:
+                idx = current_hour
+                
+                if "temperature_2m" in hourly_data and len(hourly_data["temperature_2m"]) > idx:
+                    try:
+                        if hourly_data["temperature_2m"][idx] is not None: temps.append(float(hourly_data["temperature_2m"][idx]))
+                        if hourly_data["apparent_temperature"][idx] is not None: feels.append(float(hourly_data["apparent_temperature"][idx]))
+                        if hourly_data["weather_code"][idx] is not None: wmos.append(int(hourly_data["weather_code"][idx]))
+                        if hourly_data["relative_humidity_2m"][idx] is not None: humidities.append(int(hourly_data["relative_humidity_2m"][idx]))
+                        if hourly_data["surface_pressure"][idx] is not None: pressures.append(float(hourly_data["surface_pressure"][idx]))
+                        if hourly_data["wind_speed_10m"][idx] is not None: winds.append(float(hourly_data["wind_speed_10m"][idx]))
+                        if hourly_data["wind_gusts_10m"][idx] is not None: gusts.append(float(hourly_data["wind_gusts_10m"][idx]))
+                    except (IndexError, TypeError, ValueError): pass
+                if isinstance(matching_keys, list) and len(matching_keys) > 0:
                     prob_keys = [k for k in matching_keys if "probability" in k]
                     target_key = next(iter(prob_keys)) if prob_keys else next(iter(matching_keys))
                     p_arr = hourly_data.get(target_key, [])
@@ -265,18 +217,14 @@ def build_radar_intelligence():
                         try:
                             val = p_arr[idx]
                             if val is not None:
-                                if "precipitation" in target_key and "probability" not in target_key:
+                                if "precipitation" in target_key and not "probability" in target_key:
                                     probs[m_id] = 100 if float(val) > 0.1 else 0
-                                else: 
-                                    probs[m_id] = int(val)
-                                    
+                                else: probs[m_id] = int(val)
                                 statuses[m_id] = "🟢 Достоверно"
                                 is_alive[m_id] = True
                                 server_matrix[m_id][d["id"]] = "🟢"
                         except (ValueError, TypeError): pass
-            else: 
-                statuses[m_id] = msg
-                
+            else: statuses[m_id] = msg
         live_models = [m for m in ALL_MODELS if is_alive[m]]
         final_p = min(max(int(sum((BASE_WEIGHTS[m] / sum(BASE_WEIGHTS[lm] for lm in live_models)) * probs[m] for m in live_models)), 0), 100) if live_models else None
         
@@ -287,7 +235,6 @@ def build_radar_intelligence():
         avg_press = round((sum(pressures)/len(pressures)) * 0.75006) if pressures else 750
         avg_wind = round((sum(winds)/len(winds)), 1) if winds else 0
         max_gust = round(max(gusts), 1) if gusts else 0
-        
         forecast_results.append({
             "id": d["id"], "name": d["name"], "center": d["center"], "prob": final_p,
             "temp": avg_temp, "feel": avg_feel, "wmo": final_wmo, "hum": avg_hum,
@@ -302,7 +249,7 @@ with st.spinner("⚡ Сканирование атмосферных парам�
     fdata, matrix_data = build_radar_intelligence()
 r_dict = {dist["name"]: dist["prob"] for dist in fdata}
 
-# 🎨 1. РЕНДЕРИНГ STORIES
+# 🎨 1. МОНОЛИТНЫЙ РЕНДЕРИНГ STORIES
 stories_elements = []
 for dist in fdata:
     p = dist["prob"]
@@ -334,31 +281,21 @@ st.markdown(f'<div class="stories-feed">{"".join(stories_elements)}</div>', unsa
 st.markdown("<br>", unsafe_allow_html=True)
 
 # --- 2. ОТРИСОВКА ИНТЕРАКТИВНОЙ КАРТЫ FOLIUM ---
-try:
-    with open("ufa_districts.geojson", "r", encoding="utf-8") as f: 
-        ufa_geo = json.load(f)
-    m = folium.Map(location=[54.745, 55.960], zoom_start=11, tiles="OpenStreetMap")
-    
-    def style_d(feat):
-        name = feat.get("properties", {}).get("name", "").strip()
-        if name and "район" not in name.lower(): name = name + " район"
-        p = r_dict.get(name, None)
-        if p is None: return {"fillColor": "#cbd5e1", "color": "#94a3b8", "weight": 2.0, "fillOpacity": 0.1}
-        color = "#1d4ed8" if p > 75 else ("#3b82f6" if p > 45 else ("#facc15" if p > 15 else "#16a34a"))
-        return {"fillColor": color, "color": "#0f172a", "weight": 2.5, "fillOpacity": 0.3}
-
-    folium.GeoJson(ufa_geo, style_function=style_d, tooltip=folium.GeoJsonTooltip(fields=["name"])).add_to(m)
-    for dist in fdata:
-        p_val = dist['prob']
-        display_text = "—" if p_val is None else f"{p_val}%"
-        folium.Marker(
-            location=dist["center"], 
-            icon=folium.DivIcon(icon_size=(60, 40), icon_anchor=(30, 20), 
-            html=f"""<div style="font-family: 'Segoe UI', Arial, sans-serif; font-size: 14px; font-weight: 900; color: #0f172a; text-shadow: 2px 2px 0px #fff, -2px -2px 0px #fff; text-align: center; width: 100%;">{display_text}</div>""")
-        ).add_to(m)
-    st_folium(m, width=950, height=480, key="ufa_instagram_radar_v2_premium")
-except Exception as e:
-    st.error(f"Не удалось загрузить карту или геоданные районов: {e}")
+with open("ufa_districts.geojson", "r", encoding="utf-8") as f: ufa_geo = json.load(f)
+m = folium.Map(location=[54.745, 55.960], zoom_start=11, tiles="OpenStreetMap")
+def style_d(feat):
+    name = feat.get("properties", {}).get("name", "").strip()
+    if name and "район" not in name.lower(): name = name + " район"
+    p = r_dict.get(name, None)
+    if p is None: return {"fillColor": "#cbd5e1", "color": "#94a3b8", "weight": 2.0, "fillOpacity": 0.1}
+    color = "#1d4ed8" if p > 75 else ("#3b82f6" if p > 45 else ("#facc15" if p > 15 else "#16a34a"))
+    return {"fillColor": color, "color": "#0f172a", "weight": 2.5, "fillOpacity": 0.3}
+folium.GeoJson(ufa_geo, style_function=style_d, tooltip=folium.GeoJsonTooltip(fields=["name"])).add_to(m)
+for dist in fdata:
+    p_val = dist['prob']
+    display_text = "—" if p_val is None else f"{p_val}%"
+    folium.Marker(location=dist["center"], icon=folium.DivIcon(icon_size=(60, 40), icon_anchor=(30, 20), html=f"""<div style="font-family: 'Segoe UI', Arial, sans-serif; font-size: 14px; font-weight: 900; color: #0f172a; text-shadow: 2px 2px 0px #fff, -2px -2px 0px #fff; text-align: center; width: 100%;">{display_text}</div>""")).add_to(m)
+st_folium(m, width=950, height=480, key="ufa_instagram_radar_v2_premium")
 # ==========================================
 # ЧАСТЬ 5: Лента публикаций (Grid) и Highlights
 # Длина блока: ~50 строк
@@ -376,7 +313,6 @@ for dist in fdata:
     elif code in (71, 73, 75, 77, 85, 86): emoji = "🌨️"
     elif code in (95, 96, 99): emoji = "⛈️"
     else: emoji = "☁️"
-    
     gust_alert = "⚠️ Внимание: сильные порывы ветра!" if dist["gust"] > 11.0 else "Потоки ветра стабильны"
     single_post_html = f"""
     <div class="insta-post">
@@ -397,7 +333,7 @@ st.markdown(f'<div class="insta-grid">{"".join(posts_elements)}</div>', unsafe_a
 st.markdown("<br><br>", unsafe_allow_html=True)
 
 # --- 4. HIGHLIGHTS (МАТРИЦА СЕРВЕРОВ) ---
-st.markdown("### 🗂️ Актуальное (Highlights) — Состояние системных ядер")
+st.markdown("### 🗂️ Актуальное (Highlights) — Состояние системных ядра")
 h_cols = st.columns(len(ALL_MODELS))
 for i, m_id in enumerate(ALL_MODELS):
     m_statuses = matrix_data.get(m_id, {})
