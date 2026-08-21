@@ -1,6 +1,6 @@
 # ==========================================
-# ЧАСТЬ 1: Конфигурация, Стили и Модели данных
-# Длина блока: ~115 строк
+# ЧАСТЬ 1: Конфигурация, Стили и Блок ручного обновления (Кнопка)
+# Длина блока: ~125 строк
 # ==========================================
 import streamlit as st
 import requests
@@ -115,8 +115,20 @@ INSTAGRAM_STYLE = """
 
 st.set_page_config(page_title="WeatherGram Ufa", layout="wide", page_icon="📸")
 st.markdown(INSTAGRAM_STYLE, unsafe_allow_html=True)
-st.title("📸 WeatherGram Ufa")
-st.caption("Полнофункциональный погодный инстаграм-глянец радара Уфы")
+
+# Верстка верхней панели управления (Инстаграм-шапка + функциональная кнопка)
+header_left, header_right = st.columns([4, 1])
+
+with header_left:
+    st.title("📸 WeatherGram Ufa")
+    st.caption("Полнофункциональный погодный инстаграм-глянец радара Уфы")
+
+with header_right:
+    st.markdown("<div style='height: 25px;'></div>", unsafe_allow_html=True)
+    # Кнопка обновления данных сбросит внутренний кэш Streamlit и перезапустит скрипт
+    if st.button("🔄 Обновить радар", use_container_width=True, type="secondary"):
+        st.cache_data.clear()
+        st.rerun()
 
 SUB_PREFIX, BASE_DOMAIN = "api", "open-meteo.com"
 VALID_OPEN_METEO_URL = f"https://{SUB_PREFIX}.{BASE_DOMAIN}/v1/forecast"
@@ -134,6 +146,7 @@ DISTRICT_COORDS = [
 ALL_MODELS = ["ecmwf", "gfs", "icon", "jma"]
 BASE_WEIGHTS = {m: 1.0 / len(ALL_MODELS) for m in ALL_MODELS}
 HEADERS = {"User-Agent": "Mozilla/5.0 RadarUfa/1.0", "Accept": "application/json"}
+
 # ==========================================
 # ЧАСТЬ 2: Генерация исходных URL и Сетевой воркер
 # Длина блока: ~60 строк
