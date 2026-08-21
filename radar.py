@@ -7,6 +7,7 @@ import requests
 import folium
 import json
 from datetime import datetime, timedelta
+from urllib.parse import urlencode, urljoin
 from streamlit_folium import st_folium
 from concurrent.futures import ThreadPoolExecutor
 
@@ -132,23 +133,43 @@ ALL_MODELS = ["ecmwf", "gfs", "icon", "jma"]
 BASE_WEIGHTS = {m: 1.0 / len(ALL_MODELS) for m in ALL_MODELS}
 HEADERS = {"User-Agent": "Mozilla/5.0 RadarUfa/1.0", "Accept": "application/json"}
 # ==========================================
-# ЧАСТЬ 2: Маршрутизация запросов к API (Фикс JMA)
+# ЧАСТЬ 2: Защищенный генератор URL (urllib)
 # Длина блока: ~65 строк
 # ==========================================
 def get_model_url(lat, lon, model_key):
-    # Базовый набор запрашиваемых параметров
-    params = f"latitude={lat}&longitude={lon}&timezone=UTC&forecast_days=2&hourly=temperature_2m,apparent_temperature,weather_code,relative_humidity_2m,surface_pressure,wind_speed_10m,wind_gusts_10m"
+    base_params = {
+        "latitude": lat,
+        "longitude": lon,
+        "timezone": "UTC",
+        "forecast_days": 2,
+    }
     
-    # ФИКС: Для модели JMA используется выделенный эндпоинт v1/jma, не поддерживающий precipitation_probability
+    # Базовые почасовые метрики, запрашиваемые у всех ядер
+    hourly_metrics = [
+        "temperature_2m", "apparent_temperature", "weather_code",
+        "relative_humidity_2m", "surface_pressure", "wind_speed_10m", "wind_gusts_10m"
+    ]
+    
+    # Разделение логики точек доступа API и специфичных для моделей параметров
     if model_key == "jma":
-        return f"https://open-meteo.com?{params},precipitation"
+        endpoint = "https://open-meteo.com"
+        hourly_metrics.append("precipitation")
+    else:
+        endpoint = "https://open-meteo.com"
+        hourly_metrics.append("precipitation_probability")
         
-    # Остальные глобальные модели работают через стандартную точку прогноза v1/forecast
-    base_url = "https://api.open-meteo.com/v1/forecast"
-    if model_key == "ecmwf": return f"{base_url}?{params},precipitation_probability&models=ecmwf_ifs"
-    elif model_key == "gfs": return f"{base_url}?{params},precipitation_probability&models=gfs_seamless"
-    elif model_key == "icon": return f"{base_url}?{params},precipitation_probability&models=icon_seamless"
-    return f"{base_url}?{params}"
+        if model_key == "ecmwf":
+            base_params["models"] = "ecmwf_ifs"
+        elif model_key == "gfs":
+            base_params["models"] = "gfs_seamless"
+        elif model_key == "icon":
+            base_params["models"] = "icon_seamless"
+            
+    base_params["hourly"] = ",".join(hourly_metrics)
+    
+    # ЗАЩИТА: Безопасная сборка URL-строки через urlencode без ручной конкатенации
+    query_string = urlencode(base_params)
+    return f"{endpoint}?{query_string}"
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_single_api_node(url):
@@ -244,7 +265,6 @@ def build_radar_intelligence():
                         try:
                             val = p_arr[idx]
                             if val is not None:
-                                # Если модель отдала интенсивность осадков в мм (как JMA) — преобразуем в вероятность
                                 if "precipitation" in target_key and "probability" not in target_key:
                                     probs[m_id] = 100 if float(val) > 0.1 else 0
                                 else: 
