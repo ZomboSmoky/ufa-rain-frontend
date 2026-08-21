@@ -289,14 +289,14 @@ def build_radar_intelligence():
     return forecast_results, server_matrix
 
 # ==========================================
-# ЧАСТЬ 4: Визуализация — Stories и Карта Folium
-# Длина блока: ~85 строк
+# ЧАСТЬ 4: Визуализация — Stories и Скорректированная Карта Folium
+# Длина блока: ~90 строк
 # ==========================================
 with st.spinner("⚡ Сканирование атмосферных параметров..."):
     fdata, matrix_data = build_radar_intelligence()
 r_dict = {dist["name"]: dist["prob"] for dist in fdata}
 
-# 🎨 1. МОНОЛИТНЫЙ РЕНДЕРИНГ STORIES
+# 🎨 1. РЕНДЕРИНГ STORIES
 stories_elements = []
 for dist in fdata:
     p = dist["prob"]
@@ -327,22 +327,45 @@ for dist in fdata:
 st.markdown(f'<div class="stories-feed">{"".join(stories_elements)}</div>', unsafe_allow_html=True)
 st.markdown("<br>", unsafe_allow_html=True)
 
-# --- 2. ОТРИСОВКА ИНТЕРАКТИВНОЙ КАРТЫ FOLIUM ---
-with open("ufa_districts.geojson", "r", encoding="utf-8") as f: ufa_geo = json.load(f)
-m = folium.Map(location=[54.745, 55.960], zoom_start=11, tiles="OpenStreetMap")
-def style_d(feat):
-    name = feat.get("properties", {}).get("name", "").strip()
-    if name and "район" not in name.lower(): name = name + " район"
-    p = r_dict.get(name, None)
-    if p is None: return {"fillColor": "#cbd5e1", "color": "#94a3b8", "weight": 2.0, "fillOpacity": 0.1}
-    color = "#1d4ed8" if p > 75 else ("#3b82f6" if p > 45 else ("#facc15" if p > 15 else "#16a34a"))
-    return {"fillColor": color, "color": "#0f172a", "weight": 2.5, "fillOpacity": 0.3}
-folium.GeoJson(ufa_geo, style_function=style_d, tooltip=folium.GeoJsonTooltip(fields=["name"])).add_to(m)
-for dist in fdata:
-    p_val = dist['prob']
-    display_text = "—" if p_val is None else f"{p_val}%"
-    folium.Marker(location=dist["center"], icon=folium.DivIcon(icon_size=(60, 40), icon_anchor=(30, 20), html=f"""<div style="font-family: 'Segoe UI', Arial, sans-serif; font-size: 14px; font-weight: 900; color: #0f172a; text-shadow: 2px 2px 0px #fff, -2px -2px 0px #fff; text-align: center; width: 100%;">{display_text}</div>""")).add_to(m)
-st_folium(m, width=950, height=480, key="ufa_instagram_radar_v2_premium")
+# --- 2. ОТРИСОВКА ИНТЕРАКТИВНОЙ КАРТЫ FOLIUM (ОПТИМИЗИРОВАННЫЙ МАСШТАБ) ---
+try:
+    with open("ufa_districts.geojson", "r", encoding="utf-8") as f: 
+        ufa_geo = json.load(f)
+        
+    # ИСПРАВЛЕНИЕ: Координаты смещены на север [54.800, 56.020], а масштаб изменен с 11 на 10
+    m = folium.Map(location=[54.800, 56.020], zoom_start=10, tiles="OpenStreetMap")
+    
+    def style_d(feat):
+        name = feat.get("properties", {}).get("name", "").strip()
+        if name and "район" not in name.lower(): name = name + " район"
+        p = r_dict.get(name, None)
+        if p is None: return {"fillColor": "#cbd5e1", "color": "#94a3b8", "weight": 2.0, "fillOpacity": 0.1}
+        color = "#1d4ed8" if p > 75 else ("#3b82f6" if p > 45 else ("#facc15" if p > 15 else "#16a34a"))
+        return {"fillColor": color, "color": "#0f172a", "weight": 2.5, "fillOpacity": 0.3}
+
+    folium.GeoJson(ufa_geo, style_function=style_d, tooltip=folium.GeoJsonTooltip(fields=["name"])).add_to(m)
+    
+    for dist in fdata:
+        p_val = dist['prob']
+        display_text = "—" if p_val is None else f"{p_val}%"
+        
+        # ЗАЩИТА: Сборка HTML без f-строк со стилями для безопасности рендеринга текста
+        marker_html = (
+            '<div style="font-family: \'Segoe UI\', Arial, sans-serif; font-size: 14px; font-weight: 900; '
+            'color: #0f172a; text-shadow: 2px 2px 0px #fff, -2px -2px 0px #fff; text-align: center; width: 100%;">'
+            + display_text +
+            '</div>'
+        )
+        
+        folium.Marker(
+            location=dist["center"], 
+            icon=folium.DivIcon(icon_size=(60, 40), icon_anchor=(30, 20), html=marker_html)
+        ).add_to(m)
+        
+    st_folium(m, width=950, height=480, key="ufa_instagram_radar_v2_premium")
+except Exception as e:
+    st.error(f"Не удалось загрузить карту или геоданные районов: {e}")
+
 # ==========================================
 # ЧАСТЬ 5: Исправленная лента публикаций (Без бага с сырым HTML)
 # Длина блока: ~90 строк
